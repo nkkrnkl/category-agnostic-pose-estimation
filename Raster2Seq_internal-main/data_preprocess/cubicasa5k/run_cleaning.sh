@@ -1,0 +1,2 @@
+python remove_overlapping_rooms.py --input_dir /share/elor/htp26/floorplan_datasets/coco_cubicasa5k_nowalls_v5-1_refined \
+    --output_dir /share/elor/htp26/floorplan_datasets/coco_cubicasa5k_nowalls_v5-2_refined
