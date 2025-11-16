@@ -5,9 +5,12 @@
 
 set -e  # Exit on error
 
+# Enable MPS fallback for unsupported operations on Mac
+export PYTORCH_ENABLE_MPS_FALLBACK=1
+
 MODE=${1:-test}
 PROJECT_ROOT="/Users/theodorechronopoulos/Desktop/Cornell Courses/Deep Learning/Project"
-cd "$PROJECT_ROOT/theodoros"
+cd "$PROJECT_ROOT/category-agnostic-pose-estimation"
 
 echo "=========================================="
 echo "MP-100 CAPE Training Script"
@@ -38,12 +41,26 @@ case $MODE in
             --job_name debug
         ;;
 
+    tiny)
+        echo "Running tiny experiment (5 epochs, batch_size 8, for speed testing)..."
+        python train_mp100_cape.py \
+            --dataset_root . \
+            --mp100_split 1 \
+            --batch_size 8 \
+            --epochs 5 \
+            --lr 1e-4 \
+            --image_norm \
+            --output_dir output/tiny_test \
+            --job_name tiny_test \
+            --num_workers 4
+        ;;
+
     quick)
         echo "Running quick experiment (20 epochs)..."
         python train_mp100_cape.py \
             --dataset_root . \
             --mp100_split 1 \
-            --batch_size 2 \
+            --batch_size 4 \
             --epochs 20 \
             --lr 1e-4 \
             --image_norm \
@@ -118,8 +135,9 @@ case $MODE in
         echo "Available modes:"
         echo "  test   - Test dataset loading"
         echo "  debug  - Debug training (overfit 1 sample)"
-        echo "  quick  - Quick experiment (20 epochs)"
-        echo "  full   - Full training on split 1"
+        echo "  tiny   - Tiny experiment (5 epochs, batch_size 8, ~30-60 min)"
+        echo "  quick  - Quick experiment (20 epochs, batch_size 4, ~3-6 hours)"
+        echo "  full   - Full training on split 1 (300 epochs, ~7-14 days)"
         echo "  split1 - Full training on split 1"
         echo "  split2 - Full training on split 2"
         echo "  split3 - Full training on split 3"
@@ -127,7 +145,7 @@ case $MODE in
         echo "  split5 - Full training on split 5"
         echo "  all    - Train on all 5 splits"
         echo ""
-        echo "Example: bash START_TRAINING.sh debug"
+        echo "Example: bash START_TRAINING.sh tiny"
         exit 1
         ;;
 esac

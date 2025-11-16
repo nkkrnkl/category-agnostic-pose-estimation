@@ -270,13 +270,16 @@ def main(args):
     batch_sampler_train = torch.utils.data.BatchSampler(
         sampler_train, args.batch_size, drop_last=True)
 
+    # Disable pin_memory for MPS devices (not supported)
+    use_pin_memory = device.type == 'cuda'
+
     data_loader_train = DataLoader(dataset_train, batch_sampler=batch_sampler_train,
                                    collate_fn=trivial_batch_collator, num_workers=args.num_workers,
-                                   pin_memory=True)
+                                   pin_memory=use_pin_memory)
     data_loader_val = DataLoader(dataset_val, args.batch_size, sampler=sampler_val,
                                  drop_last=False, collate_fn=trivial_batch_collator,
                                  num_workers=args.num_workers,
-                                 pin_memory=True)
+                                 pin_memory=use_pin_memory)
 
     # Build optimizer
     def match_name_keywords(n, name_keywords):

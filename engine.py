@@ -51,7 +51,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     metric_logger.add_meter('grad_norm', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
     header = 'Epoch: [{}]'.format(epoch)
-    print_freq = 10
+    print_freq = 100  # Reduced verbosity: print every 100 iterations instead of 10
     model_obj = model if not hasattr(model, 'module') else model.module
 
     for batched_inputs, batched_extras in metric_logger.log_every(data_loader, print_freq, header):

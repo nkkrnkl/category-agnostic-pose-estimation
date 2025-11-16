@@ -1,8 +1,8 @@
 import torch
 from torch import nn
 
-from timm.models.layers import DropPath
-from timm.models.layers import Mlp
+from timm.layers import DropPath
+from timm.layers import Mlp
 
 # LayerScale NOT used by default, but might be beneficial for larger / deeper models
 class LayerScale(nn.Module):

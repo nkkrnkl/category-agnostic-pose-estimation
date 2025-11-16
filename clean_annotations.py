@@ -24,10 +24,12 @@ from collections import defaultdict
 # Paths – adjust PROJECT_ROOT if needed
 # ----------------------------------------------------------------------
 PROJECT_ROOT = Path(
-    "/Users/theodorechronopoulos/Desktop/Cornell Courses/Deep Learning/Project"
+    "/Users/theodorechronopoulos/Desktop/Cornell Courses/Deep Learning/Project/category-agnostic-pose-estimation"
 )
 ANNOTATIONS_DIR = PROJECT_ROOT / "annotations"
-IMAGES_DIR = PROJECT_ROOT / "theodoros" / "data"
+IMAGES_DIR = PROJECT_ROOT / "data"
+# The dataset loader prepends 'data/' to paths, so we need to check for this
+DATA_PREFIX = "data/"
 
 
 # ----------------------------------------------------------------------
@@ -41,12 +43,12 @@ def get_existing_images():
         # Look for common image extensions
         for pattern in ("*.jpg", "*.jpeg", "*.png", "*.JPG", "*.JPEG", "*.PNG"):
             for img_file in IMAGES_DIR.rglob(pattern):
-                # Relative path from data/ directory, e.g. "wren_body/0001.jpg"
+                # Only store relative path from data/ directory, e.g. "wren_body/0001.jpg"
+                # Do NOT add just the filename, as it causes false positives
                 rel_path = img_file.relative_to(IMAGES_DIR)
-                existing_images.add(str(rel_path))  # e.g. "wren_body/0001.jpg"
-                existing_images.add(img_file.name)  # e.g. "0001.jpg"
+                existing_images.add(str(rel_path))
 
-    print(f"Found {len(existing_images)} existing image references")
+    print(f"Found {len(existing_images)} existing image files")
     return existing_images
 
 
@@ -81,21 +83,20 @@ def clean_annotation_file(json_path, existing_images):
 
     for img in data.get("images", []):
         img_filename = img.get("file_name", "")
-        img_path = Path(img_filename)
 
-        # Build a set of possible keys that might match how we stored them:
-        #   - full path as in JSON (e.g. "wren_body/xxx.jpg")
-        #   - just the filename (e.g. "xxx.jpg")
-        #   - last two components (e.g. "wren_body/xxx.jpg" if JSON has more dirs)
-        check_paths = set()
-        check_paths.add(str(img_path))
-        check_paths.add(img_path.name)
-        parts = img_path.parts
-        if len(parts) >= 2:
-            last_two = Path(parts[-2]) / parts[-1]
-            check_paths.add(str(last_two))
+        # Remove 'data/' prefix if present (some annotations may have it)
+        clean_path = img_filename
+        if clean_path.startswith(DATA_PREFIX):
+            clean_path = clean_path[len(DATA_PREFIX) :]
 
-        if any(p in existing_images for p in check_paths):
+        # Check if file exists:
+        # 1. Check exact path match in existing_images set
+        # 2. Check if file actually exists on disk
+        file_exists = (
+            clean_path in existing_images or (IMAGES_DIR / clean_path).exists()
+        )
+
+        if file_exists:
             kept_images.append(img)
             kept_image_ids.add(img["id"])
         else:

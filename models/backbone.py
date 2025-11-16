@@ -95,9 +95,11 @@ class Backbone(BackboneBase):
                  dilation: bool,
                  input_channels=1):
         norm_layer = FrozenBatchNorm2d
+        # Use weights parameter instead of deprecated pretrained
+        weights = 'IMAGENET1K_V1' if name in ['resnet50', 'resnet101'] else 'DEFAULT'
         backbone = getattr(torchvision.models, name)(
             replace_stride_with_dilation=[False, False, dilation],
-            pretrained=True, norm_layer=norm_layer)
+            weights=weights, norm_layer=norm_layer)
         # modify the first layer to compatible with single channel input
         backbone.conv1 = nn.Conv2d(input_channels, 64, kernel_size=7, stride=2, padding=3, bias=False)
         assert name not in ('resnet18', 'resnet34'), "number of channels are hard coded"

@@ -1,0 +1,57 @@
+# Python bytecode (applies to ALL subdirectories)
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+util/__pycache__/
+
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# Training outputs
+output/
+outputs/
+*.pth
+*.ckpt
+checkpoints/
+
+# Logs
+*.log
+log.txt
+logs/
+
+# Large data files
+*.npy
+*.npz
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Results
+results/
+viz/
+
+# Annotations (if they're large - uncomment if needed)
+# annotations/
+
+data/
