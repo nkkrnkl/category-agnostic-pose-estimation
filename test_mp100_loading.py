@@ -14,14 +14,18 @@ from datasets.mp100_cape import build_mp100_cape
 import argparse
 
 
-def test_dataset_loading():
+def test_dataset_loading(dataset_root=None):
     print("=" * 80)
     print("Testing MP-100 CAPE Dataset Loading")
     print("=" * 80)
 
+    # Use current directory if dataset_root not provided
+    if dataset_root is None:
+        dataset_root = str(Path(__file__).parent.absolute())
+    
     # Create minimal args
     args = argparse.Namespace(
-        dataset_root='/Users/theodorechronopoulos/Desktop/Cornell Courses/Deep Learning/Project/theodoros',
+        dataset_root=dataset_root,
         mp100_split=1,
         semantic_classes=49,
         image_norm=True,
@@ -90,5 +94,19 @@ def test_dataset_loading():
 
 
 if __name__ == '__main__':
-    success = test_dataset_loading()
+    # Allow dataset_root to be passed as command line argument
+    parser = argparse.ArgumentParser(description='Test MP-100 dataset loading')
+    parser.add_argument('--dataset_root', type=str, default=None,
+                        help='Path to dataset root (default: current directory)')
+    parser.add_argument('--mp100_split', type=int, default=1,
+                        help='Which MP-100 split to use (1-5)')
+    cli_args = parser.parse_args()
+    
+    # Update args if provided
+    if cli_args.dataset_root:
+        dataset_root = cli_args.dataset_root
+    else:
+        dataset_root = None
+    
+    success = test_dataset_loading(dataset_root)
     sys.exit(0 if success else 1)

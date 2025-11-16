@@ -162,7 +162,44 @@ class MP100CAPE(torch.utils.data.Dataset):
         # Load image
         img_info = coco.loadImgs(img_id)[0]
         path = img_info['file_name']
-        file_name = os.path.join(self.root, path)
+        
+        # Make root path absolute to avoid relative path issues
+        root_abs = os.path.abspath(os.path.expanduser(self.root))
+        file_name = os.path.join(root_abs, path)
+        
+        # Handle path mismatches: if file doesn't exist at annotated path, try to find it
+        # by extracting just the filename and searching in the category directory
+        if not os.path.exists(file_name):
+            # Extract category and filename
+            path_parts = path.split('/')
+            if len(path_parts) >= 2:
+                category = path_parts[0]  # e.g., 'human_face'
+                filename = path_parts[-1]  # e.g., '2436720309_1.jpg'
+                # Try direct path in category folder
+                alt_path = os.path.join(root_abs, category, filename)
+                if os.path.exists(alt_path):
+                    file_name = alt_path
+                else:
+                    # Last resort: search for the filename in the category directory
+                    category_dir = os.path.join(root_abs, category)
+                    if os.path.isdir(category_dir):
+                        for root_dir, dirs, files in os.walk(category_dir):
+                            if filename in files:
+                                file_name = os.path.join(root_dir, filename)
+                                break
+        
+        # Final check: if file still doesn't exist, raise a more informative error
+        if not os.path.exists(file_name):
+            raise FileNotFoundError(
+                f"Image file not found: {file_name}\n"
+                f"  Root directory: {root_abs}\n"
+                f"  Path from annotation: {path}\n"
+                f"  Image ID: {img_id}\n"
+                f"  Please check:\n"
+                f"    1. GCS bucket is mounted correctly\n"
+                f"    2. Data symlink exists: {os.path.exists(os.path.join(os.path.dirname(root_abs), 'data'))}\n"
+                f"    3. Category directory exists: {os.path.join(root_abs, path_parts[0] if len(path_parts) >= 2 else 'unknown')}"
+            )
 
         img = np.array(Image.open(file_name).convert('RGB'))
 
@@ -395,10 +432,11 @@ def build_mp100_cape(image_set, args):
 
     # Paths
     # data folder is in dataset_root/data
-    root = Path(args.dataset_root) / "data"
-    # annotations are in dataset_root/annotations
     # Use resolve() to convert relative paths to absolute first
-    ann_file = Path(args.dataset_root).resolve() / "annotations" / f"mp100_split{split_num}_{image_set}.json"
+    dataset_root_abs = Path(args.dataset_root).resolve()
+    root = dataset_root_abs / "data"
+    # annotations are in dataset_root/annotations
+    ann_file = dataset_root_abs / "annotations" / f"mp100_split{split_num}_{image_set}.json"
 
     if not ann_file.exists():
         raise FileNotFoundError(f"Annotation file not found: {ann_file}")

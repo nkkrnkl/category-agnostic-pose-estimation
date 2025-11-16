@@ -38,7 +38,7 @@ from util.plot_utils import (
 )
 from util.plot_utils import plot_density_map, plot_semantic_rich_floorplan_opencv
 from util.plot_utils import S3D_LABEL, CC5K_LABEL
-from util.eval_utils import compute_f1
+from util.eval_utils import compute_f1, compute_pck_batch
 
 from datasets import get_dataset_class_labels
 
@@ -205,14 +205,67 @@ def evaluate(
         }
         loss_dict_unscaled = {f"{k}_unscaled": v for k, v in loss_dict.items()}
 
-        # For MP-100 CAPE, skip detailed polygon evaluation (only compute loss)
+        # For MP-100 CAPE, compute PCK metric
         if dataset_name == "mp100":
-            # Just accumulate loss metrics and skip polygon evaluation
+            # Accumulate loss metrics
             metric_logger.update(
                 loss=sum(loss_dict_scaled.values()),
                 **loss_dict_scaled,
                 **loss_dict_unscaled,
             )
+            
+            # Compute PCK using forward_inference to get keypoint predictions
+            if poly2seq:
+                # Use forward_inference to get gen_out (autoregressive predictions)
+                inference_outputs = model_obj.forward_inference(samples)
+                
+                if "gen_out" in inference_outputs:
+                    # Get predicted keypoints from gen_out (normalized [0, 1])
+                    pred_keypoints_list = []
+                    gt_keypoints_list = []
+                    
+                    # Extract ground truth keypoints from target_seq in batched_extras
+                    # target_seq contains normalized keypoint coordinates
+                    target_seq = batched_extras.get('target_seq', None)
+                    mask = batched_extras.get('mask', None)
+                    
+                    bs = len(inference_outputs["gen_out"])
+                    for i in range(bs):
+                        # Predicted keypoints from model (already normalized [0, 1])
+                        pred_gen_out = inference_outputs["gen_out"][i]
+                        # Filter out special tokens (integers like 2 for EOS, -1 for padding)
+                        pred_kpts = [kpt for kpt in pred_gen_out if isinstance(kpt, (list, np.ndarray)) and len(kpt) == 2]
+                        pred_keypoints_list.append(pred_kpts)
+                        
+                        # Ground truth keypoints from target_seq
+                        if target_seq is not None:
+                            gt_seq = target_seq[i].cpu().numpy()  # Shape: (seq_len, 2)
+                            if mask is not None:
+                                # Use mask to filter valid keypoints
+                                valid_mask = mask[i].cpu().numpy()  # Shape: (seq_len,)
+                                gt_kpts = gt_seq[valid_mask > 0].tolist()
+                            else:
+                                # Filter out padding (zeros)
+                                gt_kpts = [kpt.tolist() for kpt in gt_seq if np.any(kpt != 0)]
+                            gt_keypoints_list.append(gt_kpts)
+                        else:
+                            # Fallback: use empty list if target_seq not available
+                            gt_keypoints_list.append([])
+                    
+                    # Compute PCK
+                    if len(pred_keypoints_list) > 0 and len(gt_keypoints_list) > 0:
+                        pck_scores = compute_pck_batch(
+                            pred_keypoints_list, 
+                            gt_keypoints_list, 
+                            image_size,
+                            thresholds=[0.05, 0.1, 0.2],
+                            normalize_by='image'
+                        )
+                        
+                        # Update metric logger with PCK scores
+                        for key, value in pck_scores.items():
+                            metric_logger.update(**{key: value})
+            
             continue
 
         bs = outputs["pred_logits"].shape[0]
