@@ -9,8 +9,10 @@ set -e  # Exit on error
 export PYTORCH_ENABLE_MPS_FALLBACK=1
 
 MODE=${1:-test}
-PROJECT_ROOT="/Users/theodorechronopoulos/Desktop/Cornell Courses/Deep Learning/Project"
-cd "$PROJECT_ROOT/category-agnostic-pose-estimation"
+# Get the project root from the script's location
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+cd "$SCRIPT_DIR"
 
 echo "=========================================="
 echo "MP-100 CAPE Training Script"
@@ -20,19 +22,55 @@ echo ""
 
 # Check if venv is activated
 if [[ -z "$VIRTUAL_ENV" ]]; then
-    echo "Activating virtual environment..."
-    source "$PROJECT_ROOT/venv/bin/activate"
+    # Try to find and activate venv (check current directory first, then parent)
+    if [ -f ".venv/bin/activate" ]; then
+        echo "Activating local .venv virtual environment..."
+        source ".venv/bin/activate"
+    elif [ -f "venv/bin/activate" ]; then
+        echo "Activating local venv virtual environment..."
+        source "venv/bin/activate"
+    elif [ -f "$PROJECT_ROOT/venv/bin/activate" ]; then
+        echo "Activating parent venv virtual environment..."
+        source "$PROJECT_ROOT/venv/bin/activate"
+    else
+        echo "Warning: No virtual environment found. Using system Python."
+        echo "  To create one: python3 -m venv .venv && source .venv/bin/activate"
+    fi
+fi
+
+# Ensure data symlink exists for mounted GCS data
+if [ ! -e "data" ] && [ -d "Raster2Seq_internal-main/data" ]; then
+    echo "Creating symlink: data -> Raster2Seq_internal-main/data"
+    ln -s Raster2Seq_internal-main/data data
+fi
+
+# Verify mount is active
+if [ ! -d "Raster2Seq_internal-main/data" ] || [ -z "$(mount | grep 'Raster2Seq_internal-main/data')" ]; then
+    echo "Warning: GCS mount may not be active. Make sure to run:"
+    echo "  cd Raster2Seq_internal-main && ./mount_gcs.sh"
+    echo ""
+fi
+
+# Determine Python command
+PYTHON_CMD="python3"
+if command -v python3 &> /dev/null; then
+    PYTHON_CMD="python3"
+elif command -v python &> /dev/null; then
+    PYTHON_CMD="python"
+else
+    echo "Error: Python not found. Please install Python or activate a virtual environment."
+    exit 1
 fi
 
 case $MODE in
     test)
         echo "Running dataset loading test..."
-        python test_mp100_loading.py
+        $PYTHON_CMD test_mp100_loading.py
         ;;
 
     debug)
         echo "Running debug training (overfit 1 sample, 50 epochs)..."
-        python train_mp100_cape.py \
+        $PYTHON_CMD train_mp100_cape.py \
             --debug \
             --dataset_root . \
             --mp100_split 1 \
@@ -43,7 +81,7 @@ case $MODE in
 
     tiny)
         echo "Running tiny experiment (5 epochs, batch_size 8, for speed testing)..."
-        python train_mp100_cape.py \
+        $PYTHON_CMD train_mp100_cape.py \
             --dataset_root . \
             --mp100_split 1 \
             --batch_size 8 \
@@ -57,7 +95,7 @@ case $MODE in
 
     quick)
         echo "Running quick experiment (20 epochs)..."
-        python train_mp100_cape.py \
+        $PYTHON_CMD train_mp100_cape.py \
             --dataset_root . \
             --mp100_split 1 \
             --batch_size 4 \
@@ -71,7 +109,7 @@ case $MODE in
 
     full)
         echo "Running full training on split 1 (300 epochs)..."
-        python train_mp100_cape.py \
+        $PYTHON_CMD train_mp100_cape.py \
             --dataset_root . \
             --mp100_split 1 \
             --batch_size 4 \
@@ -89,7 +127,7 @@ case $MODE in
     split*)
         SPLIT_NUM=${MODE#split}
         echo "Running full training on split $SPLIT_NUM..."
-        python train_mp100_cape.py \
+        $PYTHON_CMD train_mp100_cape.py \
             --dataset_root . \
             --mp100_split $SPLIT_NUM \
             --batch_size 4 \
@@ -111,7 +149,7 @@ case $MODE in
             echo "=========================================="
             echo "Training Split $split / 5"
             echo "=========================================="
-            python train_mp100_cape.py \
+            $PYTHON_CMD train_mp100_cape.py \
                 --dataset_root . \
                 --mp100_split $split \
                 --batch_size 4 \
