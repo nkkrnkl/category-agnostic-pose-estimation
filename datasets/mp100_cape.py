@@ -337,12 +337,37 @@ class MP100CAPE(torch.utils.data.Dataset):
         num_bins = self.tokenizer.num_bins
         quant_poly = [poly * (num_bins - 1) for poly in polygons]
 
-        # 4 indices for bilinear interpolation (floor/ceil combinations)
-        index11 = [[math.floor(p[0])*num_bins + math.floor(p[1]) for p in poly] for poly in quant_poly]
-        index21 = [[math.ceil(p[0])*num_bins + math.floor(p[1]) for p in poly] for poly in quant_poly]
-        index12 = [[math.floor(p[0])*num_bins + math.ceil(p[1]) for p in poly] for poly in quant_poly]
-        index22 = [[math.ceil(p[0])*num_bins + math.ceil(p[1]) for p in poly] for poly in quant_poly]
+        # Clamp quantized values to [0, num_bins - 1] to prevent out-of-bounds indices
+        # This ensures floor/ceil operations don't exceed valid vocabulary range
+        quant_poly = [np.clip(poly, 0, num_bins - 1) for poly in quant_poly]
 
+        # 4 indices for bilinear interpolation (floor/ceil combinations)
+        # Clamp indices to valid range [0, num_bins * num_bins - 1]
+        def safe_index(x, y, use_ceil_x, use_ceil_y):
+            """Compute index with bounds checking"""
+            x_idx = math.ceil(x) if use_ceil_x else math.floor(x)
+            y_idx = math.ceil(y) if use_ceil_y else math.floor(y)
+            # Clamp to valid range
+            x_idx = max(0, min(int(x_idx), num_bins - 1))
+            y_idx = max(0, min(int(y_idx), num_bins - 1))
+            return x_idx * num_bins + y_idx
+        
+        index11 = [[safe_index(p[0], p[1], False, False) for p in poly] for poly in quant_poly]
+        index21 = [[safe_index(p[0], p[1], True, False) for p in poly] for poly in quant_poly]
+        index12 = [[safe_index(p[0], p[1], False, True) for p in poly] for poly in quant_poly]
+        index22 = [[safe_index(p[0], p[1], True, True) for p in poly] for poly in quant_poly]
+
+        # Validate indices are within vocabulary range before tokenization
+        max_valid_idx = num_bins * num_bins - 1
+        for idx_list in [index11, index21, index12, index22]:
+            for sublist in idx_list:
+                for idx in sublist:
+                    if idx < 0 or idx > max_valid_idx:
+                        raise ValueError(
+                            f"Invalid token index {idx} (valid range: 0-{max_valid_idx}). "
+                            f"This indicates a bug in index computation."
+                        )
+        
         # Tokenize each index sequence
         seq11 = self.tokenizer(index11, add_bos=True, add_eos=False, dtype=torch.long)
         seq21 = self.tokenizer(index21, add_bos=True, add_eos=False, dtype=torch.long)
