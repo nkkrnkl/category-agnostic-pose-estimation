@@ -275,6 +275,7 @@ class MetricLogger(object):
                         i, len(iterable), eta=eta_string,
                         meters=str(self),
                         time=str(iter_time), data=str(data_time)))
+                print()  # Add empty line for better readability
             i += 1
             end = time.time()
         total_time = time.time() - start_time
