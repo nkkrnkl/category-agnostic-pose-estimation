@@ -537,13 +537,17 @@ class SetCriterion(nn.Module):
 
         target_classes = targets['token_labels'].to(src_logits.device)
         mask = (target_classes != -1).bool()
-        loss_ce = label_smoothed_nll_loss(src_logits[mask], target_classes[mask],
+        # Convert logits to log probabilities for NLL loss
+        src_log_probs = F.log_softmax(src_logits, dim=-1)
+        loss_ce = label_smoothed_nll_loss(src_log_probs[mask], target_classes[mask],
                                           epsilon=self.label_smoothing)
         losses = {'loss_ce': loss_ce}
 
         # hack implementation of room label/door/window prediction
         if 'pred_room_logits' in outputs:
             room_src_logits = outputs['pred_room_logits']
+            # Convert logits to log probabilities for NLL loss
+            room_src_log_probs = F.log_softmax(room_src_logits, dim=-1)
             # room_target_classes_o = torch.cat([t["room_labels"][J] for t, (_, J) in zip(targets, indices)]).to(room_src_logits)
             # room_target_classes = torch.full(room_src_logits.shape[:2], self.semantic_classes-1,
             #                             dtype=torch.int64, device=room_src_logits.device)
@@ -554,14 +558,14 @@ class SetCriterion(nn.Module):
                 # Only compute loss if there are CLS tokens
                 if mask.sum() > 0:
                     # loss_ce_room = F.cross_entropy(room_src_logits[mask], room_target_classes[room_target_classes != -1])
-                    loss_ce_room = label_smoothed_nll_loss(room_src_logits[mask], room_target_classes[room_target_classes != -1], epsilon=self.label_smoothing)
+                    loss_ce_room = label_smoothed_nll_loss(room_src_log_probs[mask], room_target_classes[room_target_classes != -1], epsilon=self.label_smoothing)
                 else:
                     # No CLS tokens - skip room classification loss
                     loss_ce_room = torch.tensor(0.0, device=src_logits.device)
             else:
                 room_target_classes = targets['target_polygon_labels'].to(room_src_logits.device)
                 # loss_ce_room = F.cross_entropy(room_src_logits[room_target_classes != -1], room_target_classes[room_target_classes != -1])
-                loss_ce_room = label_smoothed_nll_loss(room_src_logits[room_target_classes != -1], room_target_classes[room_target_classes
+                loss_ce_room = label_smoothed_nll_loss(room_src_log_probs[room_target_classes != -1], room_target_classes[room_target_classes
                     != -1], epsilon=self.label_smoothing)
 
             losses = {'loss_ce': loss_ce, 'loss_ce_room': loss_ce_room}
