@@ -730,8 +730,39 @@ def build_mp100_cape(image_set, args):
     # Use resolve() to convert relative paths to absolute first
     dataset_root_abs = Path(args.dataset_root).resolve()
     root = dataset_root_abs / "data"
-    # annotations are in dataset_root/annotations
-    ann_file = dataset_root_abs / "annotations" / f"mp100_split{split_num}_{image_set}.json"
+    
+    # Use cleaned_annotations from GCS bucket instead of local annotations
+    # The cleaned_annotations directory is at the bucket root level (same level as 'data')
+    # Since data is mounted/symlinked, cleaned_annotations should be accessible at the same level
+    # Try cleaned_annotations first, fallback to annotations for backward compatibility
+    cleaned_ann_dir = dataset_root_abs / "cleaned_annotations"
+    regular_ann_dir = dataset_root_abs / "annotations"
+    
+    # Check which annotation directory exists
+    if cleaned_ann_dir.exists() and cleaned_ann_dir.is_dir():
+        ann_dir = cleaned_ann_dir
+        print(f"Using cleaned annotations from: {ann_dir}")
+    elif regular_ann_dir.exists() and regular_ann_dir.is_dir():
+        ann_dir = regular_ann_dir
+        print(f"Using regular annotations from: {ann_dir} (cleaned_annotations not found)")
+    else:
+        # If neither exists at dataset_root level, check if cleaned_annotations is at mount point level
+        # (e.g., if dataset_root is inside the mount, cleaned_annotations might be at mount root)
+        mount_parent = dataset_root_abs.parent
+        cleaned_ann_mount = mount_parent / "cleaned_annotations"
+        if cleaned_ann_mount.exists() and cleaned_ann_mount.is_dir():
+            ann_dir = cleaned_ann_mount
+            print(f"Using cleaned annotations from mount level: {ann_dir}")
+        else:
+            raise FileNotFoundError(
+                f"Neither cleaned_annotations nor annotations directory found.\n"
+                f"  Checked: {cleaned_ann_dir}\n"
+                f"  Checked: {regular_ann_dir}\n"
+                f"  Checked: {cleaned_ann_mount}\n"
+                f"  Please ensure cleaned_annotations exists in the GCS bucket."
+            )
+    
+    ann_file = ann_dir / f"mp100_split{split_num}_{image_set}.json"
 
     if not ann_file.exists():
         raise FileNotFoundError(f"Annotation file not found: {ann_file}")
