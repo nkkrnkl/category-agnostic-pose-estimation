@@ -29,13 +29,49 @@ except ImportError:
             return {'image': resized}
 
     class ResizeAndPad:
-        def __init__(self, size):
-            self.size = size if isinstance(size, tuple) else (size, size)
+        """Custom transform that resizes (preserving aspect ratio) and then pads to fixed size"""
+        def __init__(self, target_size, pad_value=0, interp=None):
+            """
+            Args:
+                target_size: (height, width) tuple
+                pad_value: value to use for padding
+                interp: interpolation method (unused in fallback)
+            """
+            self.target_size = target_size if isinstance(target_size, tuple) else (target_size, target_size)
+            self.pad_value = pad_value
 
         def __call__(self, image):
+            """
+            Args:
+                image: numpy array (H, W, C)
+            Returns:
+                dict with 'image' key containing transformed image
+            """
             import cv2
-            resized = cv2.resize(image, self.size[::-1])
-            return {'image': resized}
+            if isinstance(image, Image.Image):
+                image = np.array(image)
+
+            h, w = image.shape[:2]
+            target_h, target_w = self.target_size
+
+            # Calculate scale preserving aspect ratio
+            scale = min(target_h / h, target_w / w)
+            new_h, new_w = int(h * scale), int(w * scale)
+
+            # Resize preserving aspect ratio
+            resized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+
+            # Create padded image
+            padded = np.full((target_h, target_w, image.shape[2]), self.pad_value, dtype=image.dtype)
+
+            # Calculate padding offsets (center the image)
+            top = (target_h - new_h) // 2
+            left = (target_w - new_w) // 2
+
+            # Place resized image in center
+            padded[top:top + new_h, left:left + new_w] = resized
+
+            return {'image': padded}
 
     # Simplified tokenizer
     class DiscreteTokenizerV2:
@@ -94,7 +130,50 @@ class MP100CAPE(torch.utils.data.Dataset):
 
         # Load COCO format annotations
         self.coco = COCO(ann_file)
-        self.ids = list(sorted(self.coco.imgs.keys()))
+        all_ids = list(sorted(self.coco.imgs.keys()))
+
+        # Pre-filter: check which image files actually exist
+        # This helps catch missing files early and provides better error messages
+        self.skip_missing = kwargs.get('skip_missing_files', False)
+        root_abs = os.path.abspath(os.path.expanduser(self.root))
+        
+        # Detect if bucket name is a prefix in the mount structure
+        # Check if bucket name directory exists in root or parent
+        bucket_name = "dl-category-agnostic-pose-mp100-data"
+        self.bucket_prefix = None
+        if os.path.exists(os.path.join(root_abs, bucket_name)):
+            self.bucket_prefix = bucket_name
+            print(f"Detected bucket name prefix in mount: {bucket_name}")
+        elif os.path.exists(os.path.join(os.path.dirname(root_abs), bucket_name)):
+            self.bucket_prefix = bucket_name
+            print(f"Detected bucket name prefix in parent directory: {bucket_name}")
+        
+        if self.skip_missing:
+            print(f"Checking file existence for {len(all_ids)} images...")
+            valid_ids = []
+            missing_count = 0
+            for img_id in all_ids:
+                img_info = self.coco.loadImgs(img_id)[0]
+                path = img_info['file_name']
+                file_name = os.path.join(root_abs, path)
+                
+                # Try with bucket prefix if detected
+                if not os.path.exists(file_name) and self.bucket_prefix:
+                    file_name = os.path.join(root_abs, self.bucket_prefix, path)
+                
+                # Quick check - if file exists, add to valid_ids
+                if os.path.exists(file_name):
+                    valid_ids.append(img_id)
+                else:
+                    missing_count += 1
+                    if missing_count <= 5:  # Print first 5 missing files
+                        print(f"  Warning: Missing file: {path}")
+            
+            self.ids = valid_ids
+            if missing_count > 0:
+                print(f"  Skipped {missing_count} missing files. Using {len(valid_ids)} valid images.")
+        else:
+            self.ids = all_ids
 
         # For CAPE, we always use poly2seq (keypoint sequence representation)
         self.poly2seq = poly2seq
@@ -175,31 +254,108 @@ class MP100CAPE(torch.utils.data.Dataset):
             if len(path_parts) >= 2:
                 category = path_parts[0]  # e.g., 'human_face'
                 filename = path_parts[-1]  # e.g., '2436720309_1.jpg'
-                # Try direct path in category folder
-                alt_path = os.path.join(root_abs, category, filename)
-                if os.path.exists(alt_path):
-                    file_name = alt_path
+                
+                # Try multiple fallback strategies in order of likelihood
+                fallback_paths = []
+                
+                # Strategy 1: Try with bucket name prefix (if GCS mount includes bucket name)
+                # Some mounts might have: dl-category-agnostic-pose-mp100-data/amur_tiger_body/...
+                bucket_name = "dl-category-agnostic-pose-mp100-data"
+                # Use detected prefix if available, otherwise try bucket_name
+                prefix = getattr(self, 'bucket_prefix', None) or bucket_name
+                bucket_prefix_path = os.path.join(root_abs, prefix, path)
+                fallback_paths.append(bucket_prefix_path)
+                
+                # Strategy 2: Try without intermediate subdirectories (e.g., skip 'flickr/0/')
+                # Original: amur_tiger_body/flickr/0/image04686.jpg
+                # Try: amur_tiger_body/image04686.jpg
+                if len(path_parts) > 2:
+                    fallback_paths.append(os.path.join(root_abs, category, filename))
+                    # Also try with bucket prefix
+                    prefix = getattr(self, 'bucket_prefix', None) or bucket_name
+                    fallback_paths.append(os.path.join(root_abs, prefix, category, filename))
+                
+                # Strategy 3: Direct path in category folder (already tried above if len > 2)
+                if len(path_parts) == 2:
+                    fallback_paths.append(os.path.join(root_abs, category, filename))
+                    # Also try with bucket prefix
+                    prefix = getattr(self, 'bucket_prefix', None) or bucket_name
+                    fallback_paths.append(os.path.join(root_abs, prefix, category, filename))
+                
+                # Strategy 4: Try at root level (unlikely but possible)
+                fallback_paths.append(os.path.join(root_abs, filename))
+                prefix = getattr(self, 'bucket_prefix', None) or bucket_name
+                fallback_paths.append(os.path.join(root_abs, prefix, filename))
+                
+                # Strategy 5: Try with bucket prefix and full path structure
+                # Check if parent of root_abs might be the actual mount point
+                parent_dir = os.path.dirname(root_abs)
+                if os.path.basename(root_abs) == "data":
+                    # If root is "data", check if bucket is mounted at parent level
+                    bucket_mount_path = os.path.join(parent_dir, prefix, path)
+                    fallback_paths.append(bucket_mount_path)
+                    # Also try without the "data" part
+                    fallback_paths.append(os.path.join(parent_dir, prefix, category, *path_parts[1:]))
+                
+                # Try fallback paths
+                for alt_path in fallback_paths:
+                    if alt_path and os.path.exists(alt_path):
+                        file_name = alt_path
+                        break
                 else:
-                    # Last resort: search for the filename in the category directory
-                    category_dir = os.path.join(root_abs, category)
-                    if os.path.isdir(category_dir):
-                        for root_dir, dirs, files in os.walk(category_dir):
-                            if filename in files:
-                                file_name = os.path.join(root_dir, filename)
+                    # Last resort: recursive search for the filename in the category directory
+                    # Try both with and without bucket prefix
+                    prefix = getattr(self, 'bucket_prefix', None) or bucket_name
+                    search_dirs = [
+                        os.path.join(root_abs, category),
+                        os.path.join(root_abs, prefix, category) if os.path.exists(os.path.join(root_abs, prefix)) else None
+                    ]
+                    search_dirs = [d for d in search_dirs if d and os.path.isdir(d)]
+                    
+                    for category_dir in search_dirs:
+                        try:
+                            for root_dir, dirs, files in os.walk(category_dir):
+                                if filename in files:
+                                    file_name = os.path.join(root_dir, filename)
+                                    break
+                            if os.path.exists(file_name):
                                 break
+                        except (OSError, PermissionError) as e:
+                            # If we can't walk the directory (e.g., permission issues with GCS mount)
+                            pass
         
-        # Final check: if file still doesn't exist, raise a more informative error
+        # Final check: if file still doesn't exist, provide detailed debugging info
         if not os.path.exists(file_name):
-            raise FileNotFoundError(
+            # Try to get more info about what exists
+            path_parts = path.split('/')
+            category = path_parts[0] if len(path_parts) >= 1 else 'unknown'
+            category_dir = os.path.join(root_abs, category)
+            
+            # Check what's actually in the category directory
+            dir_contents = []
+            try:
+                if os.path.isdir(category_dir):
+                    dir_contents = os.listdir(category_dir)[:10]  # First 10 items
+            except (OSError, PermissionError):
+                dir_contents = ["(cannot list directory)"]
+            
+            error_msg = (
                 f"Image file not found: {file_name}\n"
                 f"  Root directory: {root_abs}\n"
                 f"  Path from annotation: {path}\n"
                 f"  Image ID: {img_id}\n"
+                f"  Category directory: {category_dir}\n"
+                f"  Category directory exists: {os.path.isdir(category_dir)}\n"
+                f"  Category directory contents (first 10): {dir_contents}\n"
                 f"  Please check:\n"
                 f"    1. GCS bucket is mounted correctly\n"
                 f"    2. Data symlink exists: {os.path.exists(os.path.join(os.path.dirname(root_abs), 'data'))}\n"
-                f"    3. Category directory exists: {os.path.join(root_abs, path_parts[0] if len(path_parts) >= 2 else 'unknown')}"
+                f"    3. File might be missing from the dataset\n"
+                f"    4. Try: ls -la {category_dir} to see what files exist"
             )
+            
+            # For now, raise the error (can be changed to skip if needed)
+            raise FileNotFoundError(error_msg)
 
         img = np.array(Image.open(file_name).convert('RGB'))
 
@@ -290,14 +446,39 @@ class MP100CAPE(torch.utils.data.Dataset):
         record["height"] = new_h
         record["width"] = new_w
 
-        # Scale keypoints
-        scale_x = new_w / orig_w
-        scale_y = new_h / orig_h
-
-        scaled_keypoints = []
-        for kpt in record["keypoints"]:
-            x, y = kpt
-            scaled_keypoints.append([x * scale_x, y * scale_y])
+        # Check if transform is ResizeAndPad (preserves aspect ratio with padding)
+        is_resize_and_pad = isinstance(self._transforms, ResizeAndPad)
+        
+        if is_resize_and_pad:
+            # ResizeAndPad: calculate scale and padding offsets
+            target_h, target_w = self._transforms.target_size
+            scale = min(target_h / orig_h, target_w / orig_w)
+            new_resized_h, new_resized_w = int(orig_h * scale), int(orig_w * scale)
+            
+            # Calculate padding offsets (centered)
+            pad_top = (target_h - new_resized_h) // 2
+            pad_left = (target_w - new_resized_w) // 2
+            
+            # Scale keypoints and add padding offset
+            scaled_keypoints = []
+            for kpt in record["keypoints"]:
+                x, y = kpt
+                # Scale first
+                x_scaled = x * scale
+                y_scaled = y * scale
+                # Add padding offset
+                x_final = x_scaled + pad_left
+                y_final = y_scaled + pad_top
+                scaled_keypoints.append([x_final, y_final])
+        else:
+            # Simple Resize: just scale (may distort aspect ratio)
+            scale_x = new_w / orig_w
+            scale_y = new_h / orig_h
+            
+            scaled_keypoints = []
+            for kpt in record["keypoints"]:
+                x, y = kpt
+                scaled_keypoints.append([x * scale_x, y * scale_y])
 
         record["keypoints"] = scaled_keypoints
 
@@ -467,10 +648,13 @@ def build_mp100_cape(image_set, args):
         raise FileNotFoundError(f"Annotation file not found: {ann_file}")
 
     # Build transforms
+    # Use ResizeAndPad to preserve aspect ratio and pad to fixed size
+    # This prevents image distortion while ensuring all images are the same size
+    image_size = getattr(args, 'image_size', 256)
     if image_set == 'train':
-        transforms = Resize((256, 256))  # Simple resize for now
+        transforms = ResizeAndPad((image_size, image_size), pad_value=0)
     else:
-        transforms = Resize((256, 256))
+        transforms = ResizeAndPad((image_size, image_size), pad_value=0)
 
     dataset = MP100CAPE(
         img_folder=str(root),
@@ -483,7 +667,8 @@ def build_mp100_cape(image_set, args):
         converter_version='v3',
         split=image_set,
         vocab_size=args.vocab_size,
-        seq_len=args.seq_len
+        seq_len=args.seq_len,
+        skip_missing_files=getattr(args, 'skip_missing_files', True)  # Skip missing files by default
     )
 
     return dataset
