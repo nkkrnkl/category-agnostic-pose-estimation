@@ -136,6 +136,8 @@ class MP100CAPE(torch.utils.data.Dataset):
         # NOTE: This can be slow for large datasets, especially with GCS mounts
         # Set skip_missing_files=False to disable and handle missing files at runtime
         self.skip_missing = kwargs.get('skip_missing_files', False)
+        # Runtime skip: catch FileNotFoundError and return None (faster than pre-filtering)
+        self.skip_missing_at_runtime = kwargs.get('skip_missing_at_runtime', False)
         root_abs = os.path.abspath(os.path.expanduser(self.root))
         
         # Detect if bucket name is a prefix in the mount structure (quick check)
@@ -266,6 +268,7 @@ class MP100CAPE(torch.utils.data.Dataset):
                 - image_id: image identifier
                 - file_name: image path
                 - seq_data: tokenized keypoint sequence
+            OR None if file not found and skip_missing_at_runtime is True
         """
         coco = self.coco
         img_id = self.ids[index]
@@ -433,8 +436,15 @@ class MP100CAPE(torch.utils.data.Dataset):
                 f"    5. Run: python check_annotation.py {img_id} to verify annotation"
             )
             
-            # For now, raise the error (can be changed to skip if needed)
-            raise FileNotFoundError(error_msg)
+            # Handle missing file based on configuration
+            if getattr(self, 'skip_missing_at_runtime', False):
+                # Skip this sample and return None (will be filtered in collate function)
+                import warnings
+                warnings.warn(f"Skipping missing file: {path} (Image ID: {img_id})", UserWarning)
+                return None
+            else:
+                # Raise error (default behavior)
+                raise FileNotFoundError(error_msg)
 
         img = np.array(Image.open(file_name).convert('RGB'))
 
@@ -747,7 +757,8 @@ def build_mp100_cape(image_set, args):
         split=image_set,
         vocab_size=args.vocab_size,
         seq_len=args.seq_len,
-        skip_missing_files=getattr(args, 'skip_missing_files', False)  # False by default (slow for large datasets)
+        skip_missing_files=getattr(args, 'skip_missing_files', False),  # False by default (slow for large datasets)
+        skip_missing_at_runtime=getattr(args, 'skip_missing_at_runtime', False)  # Faster: skip at runtime instead of pre-filtering
     )
 
     return dataset

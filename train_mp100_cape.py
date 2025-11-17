@@ -26,7 +26,11 @@ def trivial_batch_collator(batch):
     """
     Split batch records into batched_inputs and batched_extras
     For MP-100 CAPE, we need to separate image/instances from sequence data
+    Filters out None values (missing files that were skipped at runtime)
     """
+    # Filter out None values (missing files skipped at runtime)
+    batch = [record for record in batch if record is not None]
+    
     if not batch:
         return [], {}
 
@@ -176,6 +180,8 @@ def get_args_parser():
                         help='Which MP-100 split to use (1-5)')
     parser.add_argument('--skip_missing_files', action='store_true',
                         help='Pre-filter dataset to skip missing image files during initialization (slower startup but prevents runtime errors)')
+    parser.add_argument('--skip_missing_at_runtime', action='store_true',
+                        help='Skip missing files at runtime (faster than pre-filtering, only checks files as they are accessed)')
 
     # Decoder architecture
     parser.add_argument('--dec_layer_type', default='v1', type=str,
