@@ -174,6 +174,8 @@ def get_args_parser():
                         type=str, help='Path to dataset root (contains data/ and annotations/)')
     parser.add_argument('--mp100_split', default=1, type=int, choices=[1, 2, 3, 4, 5],
                         help='Which MP-100 split to use (1-5)')
+    parser.add_argument('--skip_missing_files', action='store_true',
+                        help='Pre-filter dataset to skip missing image files during initialization (slower startup but prevents runtime errors)')
 
     # Decoder architecture
     parser.add_argument('--dec_layer_type', default='v1', type=str,

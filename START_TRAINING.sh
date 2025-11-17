@@ -88,6 +88,7 @@ case $MODE in
             --epochs 5 \
             --lr 1e-4 \
             --image_norm \
+            --skip_missing_files \
             --output_dir output/tiny_test \
             --job_name tiny_test \
             --num_workers 4
