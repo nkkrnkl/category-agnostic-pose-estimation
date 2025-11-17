@@ -80,12 +80,12 @@ case $MODE in
         ;;
 
     tiny)
-        echo "Running tiny experiment (5 epochs, batch_size 8, for speed testing)..."
+        echo "Running tiny experiment (1 epoch, batch_size 8, for speed testing)..."
         $PYTHON_CMD train_mp100_cape.py \
             --dataset_root . \
             --mp100_split 2 \
             --batch_size 8 \
-            --epochs 5 \
+            --epochs 1 \
             --lr 1e-4 \
             --image_norm \
             --skip_missing_at_runtime \
@@ -174,7 +174,7 @@ case $MODE in
         echo "Available modes:"
         echo "  test   - Test dataset loading"
         echo "  debug  - Debug training (overfit 1 sample)"
-        echo "  tiny   - Tiny experiment (5 epochs, batch_size 8, ~30-60 min)"
+        echo "  tiny   - Tiny experiment (1 epoch, batch_size 8, ~5-10 min)"
         echo "  quick  - Quick experiment (20 epochs, batch_size 4, ~3-6 hours)"
         echo "  full   - Full training on split 1 (300 epochs, ~7-14 days)"
         echo "  split1 - Full training on split 1"

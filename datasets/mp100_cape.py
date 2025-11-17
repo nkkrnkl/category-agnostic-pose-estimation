@@ -733,33 +733,45 @@ def build_mp100_cape(image_set, args):
     
     # Use cleaned_annotations from GCS bucket instead of local annotations
     # The cleaned_annotations directory is at the bucket root level (same level as 'data')
-    # Since data is mounted/symlinked, cleaned_annotations should be accessible at the same level
-    # Try cleaned_annotations first, fallback to annotations for backward compatibility
+    # Check multiple possible locations:
+    # 1. Symlink at dataset_root/cleaned_annotations (created by Colab notebook)
+    # 2. Direct mount path: Raster2Seq_internal-main/data/cleaned_annotations
+    # 3. Mount parent level (if dataset_root is inside mount)
+    # 4. Fallback to regular annotations
+    
     cleaned_ann_dir = dataset_root_abs / "cleaned_annotations"
     regular_ann_dir = dataset_root_abs / "annotations"
     
-    # Check which annotation directory exists
-    if cleaned_ann_dir.exists() and cleaned_ann_dir.is_dir():
-        ann_dir = cleaned_ann_dir
-        print(f"Using cleaned annotations from: {ann_dir}")
-    elif regular_ann_dir.exists() and regular_ann_dir.is_dir():
-        ann_dir = regular_ann_dir
-        print(f"Using regular annotations from: {ann_dir} (cleaned_annotations not found)")
-    else:
-        # If neither exists at dataset_root level, check if cleaned_annotations is at mount point level
-        # (e.g., if dataset_root is inside the mount, cleaned_annotations might be at mount root)
-        mount_parent = dataset_root_abs.parent
-        cleaned_ann_mount = mount_parent / "cleaned_annotations"
-        if cleaned_ann_mount.exists() and cleaned_ann_mount.is_dir():
-            ann_dir = cleaned_ann_mount
-            print(f"Using cleaned annotations from mount level: {ann_dir}")
+    # Check multiple possible locations for cleaned_annotations
+    possible_cleaned_paths = [
+        cleaned_ann_dir,  # Symlink location
+        dataset_root_abs / "Raster2Seq_internal-main" / "data" / "cleaned_annotations",  # Direct mount path
+        dataset_root_abs.parent / "cleaned_annotations",  # Parent level
+    ]
+    
+    ann_dir = None
+    for cleaned_path in possible_cleaned_paths:
+        if cleaned_path.exists() and cleaned_path.is_dir():
+            ann_dir = cleaned_path
+            print(f"Using cleaned annotations from: {ann_dir}")
+            break
+    
+    # If cleaned_annotations not found, fall back to regular annotations
+    if ann_dir is None:
+        if regular_ann_dir.exists() and regular_ann_dir.is_dir():
+            ann_dir = regular_ann_dir
+            print(f"Using regular annotations from: {ann_dir} (cleaned_annotations not found)")
+            print(f"  Checked locations:")
+            for path in possible_cleaned_paths:
+                exists = "✓" if path.exists() else "✗"
+                print(f"    {exists} {path}")
         else:
             raise FileNotFoundError(
                 f"Neither cleaned_annotations nor annotations directory found.\n"
-                f"  Checked: {cleaned_ann_dir}\n"
-                f"  Checked: {regular_ann_dir}\n"
-                f"  Checked: {cleaned_ann_mount}\n"
-                f"  Please ensure cleaned_annotations exists in the GCS bucket."
+                f"  Checked cleaned_annotations at:\n"
+                + "\n".join(f"    - {p}" for p in possible_cleaned_paths) +
+                f"\n  Checked annotations at: {regular_ann_dir}\n"
+                f"  Please ensure cleaned_annotations exists in the GCS bucket or run the symlink cell."
             )
     
     ann_file = ann_dir / f"mp100_split{split_num}_{image_set}.json"
