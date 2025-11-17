@@ -83,7 +83,7 @@ case $MODE in
         echo "Running tiny experiment (5 epochs, batch_size 8, for speed testing)..."
         $PYTHON_CMD train_mp100_cape.py \
             --dataset_root . \
-            --mp100_split 1 \
+            --mp100_split 2 \
             --batch_size 8 \
             --epochs 5 \
             --lr 1e-4 \
