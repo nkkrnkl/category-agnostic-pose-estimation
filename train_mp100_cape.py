@@ -18,6 +18,7 @@ import torch
 from torch.utils.data import DataLoader
 import util.misc as utils
 from datasets import build_dataset
+from datasets.discrete_tokenizer import DiscreteTokenizerV2
 from engine import evaluate, train_one_epoch
 from models import build_model
 
@@ -245,9 +246,17 @@ def main(args):
     np.random.seed(seed)
     random.seed(seed)
 
+    # Build tokenizer for sequence generation
+    # Convert vocab_size to num_bins: vocab_size = num_bins * num_bins
+    # So num_bins = sqrt(vocab_size)
+    import math
+    num_bins = int(math.sqrt(args.vocab_size))
+    print(f"\nBuilding tokenizer (vocab_size={args.vocab_size}, num_bins={num_bins}, seq_len={args.seq_len})...")
+    tokenizer = DiscreteTokenizerV2(num_bins=num_bins, seq_len=args.seq_len, add_cls=False)
+    
     # Build model
     print("\nBuilding model...")
-    model, criterion = build_model(args)
+    model, criterion = build_model(args, train=True, tokenizer=tokenizer)
     model.to(device)
 
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
