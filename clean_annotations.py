@@ -23,9 +23,8 @@ from collections import defaultdict
 # ----------------------------------------------------------------------
 # Paths – adjust PROJECT_ROOT if needed
 # ----------------------------------------------------------------------
-PROJECT_ROOT = Path(
-    "/Users/theodorechronopoulos/Desktop/Cornell Courses/Deep Learning/Project/category-agnostic-pose-estimation"
-)
+# Auto-detect project root from script location
+PROJECT_ROOT = Path(__file__).parent.absolute()
 ANNOTATIONS_DIR = PROJECT_ROOT / "annotations"
 IMAGES_DIR = PROJECT_ROOT / "data"
 # The dataset loader prepends 'data/' to paths, so we need to check for this
