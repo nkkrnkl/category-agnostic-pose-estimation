@@ -192,6 +192,9 @@ def evaluate(
             )
             outputs = model(samples)
         else:
+            # Move batched_extras to device (same as in train_one_epoch)
+            for key in batched_extras.keys():
+                batched_extras[key] = batched_extras[key].to(device)
             room_targets = batched_extras
             outputs = model(samples, batched_extras)
 
