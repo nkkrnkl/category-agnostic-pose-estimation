@@ -133,11 +133,12 @@ class MP100CAPE(torch.utils.data.Dataset):
         all_ids = list(sorted(self.coco.imgs.keys()))
 
         # Pre-filter: check which image files actually exist
-        # This helps catch missing files early and provides better error messages
+        # NOTE: This can be slow for large datasets, especially with GCS mounts
+        # Set skip_missing_files=False to disable and handle missing files at runtime
         self.skip_missing = kwargs.get('skip_missing_files', False)
         root_abs = os.path.abspath(os.path.expanduser(self.root))
         
-        # Detect if bucket name is a prefix in the mount structure
+        # Detect if bucket name is a prefix in the mount structure (quick check)
         # Check if bucket name directory exists in root or parent
         bucket_name = "dl-category-agnostic-pose-mp100-data"
         self.bucket_prefix = None
@@ -149,10 +150,41 @@ class MP100CAPE(torch.utils.data.Dataset):
             print(f"Detected bucket name prefix in parent directory: {bucket_name}")
         
         if self.skip_missing:
+            # WARNING: This can be slow for large datasets (10k+ images)
+            # Each os.path.exists() on GCS mount has network latency
             print(f"Checking file existence for {len(all_ids)} images...")
+            print("  (This may take a few minutes for large datasets)")
             valid_ids = []
             missing_count = 0
-            for img_id in all_ids:
+            checked = 0
+            
+            # Sample a few files first to detect pattern
+            sample_size = min(10, len(all_ids))
+            sample_ids = all_ids[:sample_size]
+            bucket_prefix_detected = False
+            
+            for img_id in sample_ids:
+                img_info = self.coco.loadImgs(img_id)[0]
+                path = img_info['file_name']
+                file_name = os.path.join(root_abs, path)
+                
+                if not os.path.exists(file_name) and self.bucket_prefix:
+                    file_name = os.path.join(root_abs, self.bucket_prefix, path)
+                    if os.path.exists(file_name):
+                        bucket_prefix_detected = True
+                
+                if os.path.exists(file_name):
+                    valid_ids.append(img_id)
+                else:
+                    missing_count += 1
+            
+            # If bucket prefix works in sample, use it for all
+            if bucket_prefix_detected and not self.bucket_prefix:
+                self.bucket_prefix = bucket_name
+                print(f"  Detected bucket prefix pattern from sample, using for all files")
+            
+            # Now check remaining files (with progress for large datasets)
+            for img_id in all_ids[sample_size:]:
                 img_info = self.coco.loadImgs(img_id)[0]
                 path = img_info['file_name']
                 file_name = os.path.join(root_abs, path)
@@ -161,19 +193,23 @@ class MP100CAPE(torch.utils.data.Dataset):
                 if not os.path.exists(file_name) and self.bucket_prefix:
                     file_name = os.path.join(root_abs, self.bucket_prefix, path)
                 
-                # Quick check - if file exists, add to valid_ids
                 if os.path.exists(file_name):
                     valid_ids.append(img_id)
                 else:
                     missing_count += 1
                     if missing_count <= 5:  # Print first 5 missing files
                         print(f"  Warning: Missing file: {path}")
+                
+                checked += 1
+                if checked % 1000 == 0:
+                    print(f"  Checked {checked}/{len(all_ids) - sample_size} files...")
             
             self.ids = valid_ids
             if missing_count > 0:
                 print(f"  Skipped {missing_count} missing files. Using {len(valid_ids)} valid images.")
         else:
             self.ids = all_ids
+            print("  (Skipping file existence check - missing files will be handled at runtime)")
 
         # For CAPE, we always use poly2seq (keypoint sequence representation)
         self.poly2seq = poly2seq
@@ -297,14 +333,17 @@ class MP100CAPE(torch.utils.data.Dataset):
                     # Also try without the "data" part
                     fallback_paths.append(os.path.join(parent_dir, prefix, category, *path_parts[1:]))
                 
-                # Try fallback paths
+                # Try fallback paths (in order of likelihood)
+                # NOTE: We try the most likely paths first to minimize os.path.exists() calls
+                # which are slow on GCS mounts
                 for alt_path in fallback_paths:
                     if alt_path and os.path.exists(alt_path):
                         file_name = alt_path
                         break
                 else:
-                    # Last resort: recursive search for the filename in the category directory
-                    # Try both with and without bucket prefix
+                    # Last resort: limited recursive search (SLOW - avoid if possible)
+                    # Only search if we haven't found the file yet
+                    # Limit depth to avoid very slow searches on GCS mounts
                     prefix = getattr(self, 'bucket_prefix', None) or bucket_name
                     search_dirs = [
                         os.path.join(root_abs, category),
@@ -312,9 +351,19 @@ class MP100CAPE(torch.utils.data.Dataset):
                     ]
                     search_dirs = [d for d in search_dirs if d and os.path.isdir(d)]
                     
+                    # Only do recursive search if really necessary (it's very slow on GCS)
+                    # Limit to max_depth=2 to avoid deep recursion
+                    max_depth = 2
                     for category_dir in search_dirs:
                         try:
+                            depth = 0
                             for root_dir, dirs, files in os.walk(category_dir):
+                                # Limit search depth
+                                rel_depth = root_dir[len(category_dir):].count(os.sep)
+                                if rel_depth > max_depth:
+                                    dirs[:] = []  # Don't recurse deeper
+                                    continue
+                                
                                 if filename in files:
                                     file_name = os.path.join(root_dir, filename)
                                     break
@@ -668,7 +717,7 @@ def build_mp100_cape(image_set, args):
         split=image_set,
         vocab_size=args.vocab_size,
         seq_len=args.seq_len,
-        skip_missing_files=getattr(args, 'skip_missing_files', True)  # Skip missing files by default
+        skip_missing_files=getattr(args, 'skip_missing_files', False)  # False by default (slow for large datasets)
     )
 
     return dataset
