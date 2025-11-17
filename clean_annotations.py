@@ -17,6 +17,7 @@ It also creates:
 
 import json
 import shutil
+import argparse
 from pathlib import Path
 from collections import defaultdict
 
@@ -276,6 +277,41 @@ def write_cleanup_report(results, all_categories, category_image_count, output_p
 # Main
 # ----------------------------------------------------------------------
 def main():
+    parser = argparse.ArgumentParser(
+        description="Clean annotation files by removing entries for non-existent images.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Clean all annotation files (default)
+  python clean_annotations.py
+
+  # Clean only split 2 files
+  python clean_annotations.py --split 2
+
+  # Clean specific files
+  python clean_annotations.py --files mp100_split2_train.json mp100_split2_val.json
+
+  # Clean files matching a pattern
+  python clean_annotations.py --pattern "split2"
+        """
+    )
+    parser.add_argument(
+        "--split",
+        type=int,
+        help="Clean only files for a specific split (e.g., --split 2 for split2 files)"
+    )
+    parser.add_argument(
+        "--files",
+        nargs="+",
+        help="Clean specific annotation files by name (e.g., --files mp100_split2_train.json)"
+    )
+    parser.add_argument(
+        "--pattern",
+        help="Clean files matching a pattern (e.g., --pattern 'split2' or 'train')"
+    )
+    
+    args = parser.parse_args()
+
     print("=" * 80)
     print("Cleaning annotation files")
     print("=" * 80)
@@ -287,12 +323,51 @@ def main():
         return
 
     # Find all JSON annotation files in the annotations directory
-    annotation_files = sorted(ANNOTATIONS_DIR.glob("*.json"))
-    if not annotation_files:
+    all_annotation_files = sorted(ANNOTATIONS_DIR.glob("*.json"))
+    # Filter out backup files
+    all_annotation_files = [f for f in all_annotation_files if not f.name.endswith(".backup")]
+    
+    if not all_annotation_files:
         print(f"\nNo annotation files found in {ANNOTATIONS_DIR}")
         return
 
-    print(f"\nFound {len(annotation_files)} annotation file(s) to process")
+    # Filter annotation files based on arguments
+    annotation_files = []
+    if args.split:
+        # Filter by split number
+        split_pattern = f"split{args.split}"
+        annotation_files = [f for f in all_annotation_files if split_pattern in f.name]
+        if not annotation_files:
+            print(f"\nNo annotation files found matching split {args.split}")
+            return
+        print(f"\nFiltering for split {args.split} files...")
+    elif args.files:
+        # Filter by specific file names
+        annotation_files = []
+        for filename in args.files:
+            file_path = ANNOTATIONS_DIR / filename
+            if file_path.exists() and file_path in all_annotation_files:
+                annotation_files.append(file_path)
+            else:
+                print(f"Warning: File not found or is a backup: {filename}")
+        if not annotation_files:
+            print(f"\nNo valid annotation files found from the provided list")
+            return
+        print(f"\nFiltering for specific files: {args.files}")
+    elif args.pattern:
+        # Filter by pattern
+        annotation_files = [f for f in all_annotation_files if args.pattern in f.name]
+        if not annotation_files:
+            print(f"\nNo annotation files found matching pattern '{args.pattern}'")
+            return
+        print(f"\nFiltering for files matching pattern '{args.pattern}'...")
+    else:
+        # Process all files (default)
+        annotation_files = all_annotation_files
+
+    print(f"\nFound {len(annotation_files)} annotation file(s) to process:")
+    for f in annotation_files:
+        print(f"  - {f.name}")
 
     # Clean each annotation file
     results = []
