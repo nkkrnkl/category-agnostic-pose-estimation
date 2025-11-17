@@ -218,7 +218,13 @@ def get_args_parser():
     return parser
 
 
+# Track best validation loss for saving best model
+_best_val_loss = float('inf')
+
 def main(args):
+    global _best_val_loss
+    _best_val_loss = float('inf')  # Reset for each training run
+    
     print("=" * 80)
     print("Training Category-Agnostic Pose Estimation on MP-100")
     print("=" * 80)
@@ -379,9 +385,22 @@ def main(args):
 
         # Save checkpoint
         if args.output_dir:
-            checkpoint_paths = [output_dir / 'checkpoint.pth']
-            if (epoch + 1) % 20 == 0 or (epoch + 1) in [int(x) for x in args.lr_drop.split(',')]:
+            checkpoint_paths = [output_dir / 'checkpoint.pth']  # Always save latest
+            
+            # Save numbered checkpoint every N epochs (default: every epoch for short runs, every 20 for long runs)
+            save_interval = getattr(args, 'checkpoint_interval', 1 if args.epochs <= 10 else 20)
+            if (epoch + 1) % save_interval == 0 or (epoch + 1) in [int(x) for x in args.lr_drop.split(',')]:
                 checkpoint_paths.append(output_dir / f'checkpoint{epoch:04}.pth')
+            
+            # Save best model based on validation loss (if available)
+            global _best_val_loss
+            val_loss = test_stats.get('loss', None)
+            if val_loss is not None:
+                best_loss_path = output_dir / 'checkpoint_best.pth'
+                if val_loss < _best_val_loss:
+                    _best_val_loss = val_loss
+                    checkpoint_paths.append(best_loss_path)
+                    print(f"  💾 Saving best model (val_loss: {val_loss:.4f})")
 
             for checkpoint_path in checkpoint_paths:
                 torch.save({
@@ -390,6 +409,8 @@ def main(args):
                     'lr_scheduler': lr_scheduler.state_dict(),
                     'epoch': epoch,
                     'args': args,
+                    'train_stats': train_stats,
+                    'test_stats': test_stats,
                 }, checkpoint_path)
 
         # Log stats
