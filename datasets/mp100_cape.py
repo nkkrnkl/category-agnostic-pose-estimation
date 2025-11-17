@@ -294,44 +294,45 @@ class MP100CAPE(torch.utils.data.Dataset):
                 # Try multiple fallback strategies in order of likelihood
                 fallback_paths = []
                 
-                # Strategy 1: Try with bucket name prefix (if GCS mount includes bucket name)
+                # Strategy 1: Try with bucket name prefix (ONLY if detected during init)
                 # Some mounts might have: dl-category-agnostic-pose-mp100-data/amur_tiger_body/...
-                bucket_name = "dl-category-agnostic-pose-mp100-data"
-                # Use detected prefix if available, otherwise try bucket_name
-                prefix = getattr(self, 'bucket_prefix', None) or bucket_name
-                bucket_prefix_path = os.path.join(root_abs, prefix, path)
-                fallback_paths.append(bucket_prefix_path)
+                # Only try this if bucket_prefix was actually detected, otherwise skip
+                if getattr(self, 'bucket_prefix', None):
+                    bucket_prefix_path = os.path.join(root_abs, self.bucket_prefix, path)
+                    fallback_paths.append(bucket_prefix_path)
                 
                 # Strategy 2: Try without intermediate subdirectories (e.g., skip 'flickr/0/')
                 # Original: amur_tiger_body/flickr/0/image04686.jpg
                 # Try: amur_tiger_body/image04686.jpg
                 if len(path_parts) > 2:
                     fallback_paths.append(os.path.join(root_abs, category, filename))
-                    # Also try with bucket prefix
-                    prefix = getattr(self, 'bucket_prefix', None) or bucket_name
-                    fallback_paths.append(os.path.join(root_abs, prefix, category, filename))
+                    # Also try with bucket prefix (only if detected)
+                    if getattr(self, 'bucket_prefix', None):
+                        fallback_paths.append(os.path.join(root_abs, self.bucket_prefix, category, filename))
                 
                 # Strategy 3: Direct path in category folder (already tried above if len > 2)
                 if len(path_parts) == 2:
                     fallback_paths.append(os.path.join(root_abs, category, filename))
-                    # Also try with bucket prefix
-                    prefix = getattr(self, 'bucket_prefix', None) or bucket_name
-                    fallback_paths.append(os.path.join(root_abs, prefix, category, filename))
+                    # Also try with bucket prefix (only if detected)
+                    if getattr(self, 'bucket_prefix', None):
+                        fallback_paths.append(os.path.join(root_abs, self.bucket_prefix, category, filename))
                 
                 # Strategy 4: Try at root level (unlikely but possible)
                 fallback_paths.append(os.path.join(root_abs, filename))
-                prefix = getattr(self, 'bucket_prefix', None) or bucket_name
-                fallback_paths.append(os.path.join(root_abs, prefix, filename))
+                # Also try with bucket prefix (only if detected)
+                if getattr(self, 'bucket_prefix', None):
+                    fallback_paths.append(os.path.join(root_abs, self.bucket_prefix, filename))
                 
-                # Strategy 5: Try with bucket prefix and full path structure
+                # Strategy 5: Try with bucket prefix and full path structure (only if detected)
                 # Check if parent of root_abs might be the actual mount point
-                parent_dir = os.path.dirname(root_abs)
-                if os.path.basename(root_abs) == "data":
-                    # If root is "data", check if bucket is mounted at parent level
-                    bucket_mount_path = os.path.join(parent_dir, prefix, path)
-                    fallback_paths.append(bucket_mount_path)
-                    # Also try without the "data" part
-                    fallback_paths.append(os.path.join(parent_dir, prefix, category, *path_parts[1:]))
+                if getattr(self, 'bucket_prefix', None):
+                    parent_dir = os.path.dirname(root_abs)
+                    if os.path.basename(root_abs) == "data":
+                        # If root is "data", check if bucket is mounted at parent level
+                        bucket_mount_path = os.path.join(parent_dir, self.bucket_prefix, path)
+                        fallback_paths.append(bucket_mount_path)
+                        # Also try without the "data" part
+                        fallback_paths.append(os.path.join(parent_dir, self.bucket_prefix, category, *path_parts[1:]))
                 
                 # Try fallback paths (in order of likelihood)
                 # NOTE: We try the most likely paths first to minimize os.path.exists() calls
@@ -344,11 +345,11 @@ class MP100CAPE(torch.utils.data.Dataset):
                     # Last resort: limited recursive search (SLOW - avoid if possible)
                     # Only search if we haven't found the file yet
                     # Limit depth to avoid very slow searches on GCS mounts
-                    prefix = getattr(self, 'bucket_prefix', None) or bucket_name
-                    search_dirs = [
-                        os.path.join(root_abs, category),
-                        os.path.join(root_abs, prefix, category) if os.path.exists(os.path.join(root_abs, prefix)) else None
-                    ]
+                    search_dirs = [os.path.join(root_abs, category)]
+                    if getattr(self, 'bucket_prefix', None):
+                        bucket_dir = os.path.join(root_abs, self.bucket_prefix, category)
+                        if os.path.exists(os.path.join(root_abs, self.bucket_prefix)):
+                            search_dirs.append(bucket_dir)
                     search_dirs = [d for d in search_dirs if d and os.path.isdir(d)]
                     
                     # Only do recursive search if really necessary (it's very slow on GCS)
@@ -380,27 +381,56 @@ class MP100CAPE(torch.utils.data.Dataset):
             category = path_parts[0] if len(path_parts) >= 1 else 'unknown'
             category_dir = os.path.join(root_abs, category)
             
+            # Verify the image ID actually exists in annotations
+            annotation_check = ""
+            try:
+                if img_id in self.coco.imgs:
+                    img_info_check = self.coco.loadImgs(img_id)[0]
+                    annotation_check = f"  ✅ Image ID {img_id} exists in annotations\n    Annotation path: {img_info_check.get('file_name')}\n"
+                else:
+                    annotation_check = f"  ❌ Image ID {img_id} NOT found in annotations!\n    This suggests a data corruption issue.\n"
+            except:
+                annotation_check = "  ⚠️  Could not verify annotation (error checking)\n"
+            
             # Check what's actually in the category directory
             dir_contents = []
+            subdir_contents = {}
             try:
                 if os.path.isdir(category_dir):
                     dir_contents = os.listdir(category_dir)[:10]  # First 10 items
+                    # If 'flickr' is in the directory, check what's inside
+                    if 'flickr' in dir_contents:
+                        flickr_dir = os.path.join(category_dir, 'flickr')
+                        if os.path.isdir(flickr_dir):
+                            flickr_subdirs = os.listdir(flickr_dir)[:5]
+                            subdir_contents['flickr'] = flickr_subdirs
             except (OSError, PermissionError):
                 dir_contents = ["(cannot list directory)"]
             
+            # Build detailed error message
             error_msg = (
                 f"Image file not found: {file_name}\n"
+                f"{annotation_check}"
                 f"  Root directory: {root_abs}\n"
                 f"  Path from annotation: {path}\n"
                 f"  Image ID: {img_id}\n"
                 f"  Category directory: {category_dir}\n"
                 f"  Category directory exists: {os.path.isdir(category_dir)}\n"
                 f"  Category directory contents (first 10): {dir_contents}\n"
+            )
+            
+            if subdir_contents:
+                error_msg += f"  Subdirectory contents:\n"
+                for subdir, contents in subdir_contents.items():
+                    error_msg += f"    {subdir}/: {contents}\n"
+            
+            error_msg += (
                 f"  Please check:\n"
                 f"    1. GCS bucket is mounted correctly\n"
                 f"    2. Data symlink exists: {os.path.exists(os.path.join(os.path.dirname(root_abs), 'data'))}\n"
                 f"    3. File might be missing from the dataset\n"
-                f"    4. Try: ls -la {category_dir} to see what files exist"
+                f"    4. Try: ls -la {category_dir} to see what files exist\n"
+                f"    5. Run: python check_annotation.py {img_id} to verify annotation"
             )
             
             # For now, raise the error (can be changed to skip if needed)
