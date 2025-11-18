@@ -6,41 +6,28 @@ Per-file summary (images & annotations before/after):
 ----------------------------------------------------------------------------------------------------
 File                                      Img(before)  Img(after)  Ann(before)  Ann(after)
 ----------------------------------------------------------------------------------------------------
-mp100_split1_test.json                           1933        1733         2000        1800
-mp100_split1_train.json                         13104       10443        14000       11337
+mp100_split1_test.json                           1933        1933         2000        2000
+mp100_split1_train.json                         13104       12816        14000       13712
 mp100_split1_val.json                            1906        1703         2000        1795
-mp100_split2_test.json                           1961        1361         2000        1400
-mp100_split2_train.json                         12983       11665        14000       12678
-mp100_split2_val.json                            1881        1241         2000        1359
-mp100_split3_test.json                           1926        1826         2000        1900
-mp100_split3_train.json                         13152       10099        14000       10943
+mp100_split2_test.json                           1961        1955         2000        1994
+mp100_split2_train.json                         12983       12523        14000       13538
+mp100_split2_val.json                            1881        1874         2000        1993
+mp100_split3_test.json                           1926        1926         2000        2000
+mp100_split3_train.json                         13152       12678        14000       13524
 mp100_split3_val.json                            1812        1812         2000        2000
-mp100_split4_test.json                           1916        1629         2000        1711
-mp100_split4_train.json                         13186       11005        14000       11816
-mp100_split4_val.json                            1825        1337         2000        1512
-mp100_split5_test.json                           1960        1630         2000        1670
-mp100_split5_train.json                         13069       10734        14000       11661
-mp100_split5_val.json                            1857        1644         2000        1787
+mp100_split4_test.json                           1916        1729         2000        1811
+mp100_split4_train.json                         13186       13169        14000       13983
+mp100_split4_val.json                            1825        1765         2000        1940
+mp100_split5_test.json                           1960        1929         2000        1969
+mp100_split5_train.json                         13069       12655        14000       13584
+mp100_split5_val.json                            1857        1857         2000        2000
 
 Totals across all files:
 ----------------------------------------------------------------------------------------------------
-  Images:      69862 kept / 84471 before (14609 removed)
-  Annotations: 75369 kept / 90000 before (14631 removed)
+  Images:      82324 kept / 84471 before (2147 removed)
+  Annotations: 87843 kept / 90000 before (2157 removed)
 
 
 Categories with NO images after cleanup:
 ----------------------------------------------------------------------------------------------------
-  ID   1: skirt
-  ID   8: sling_dress
-  ID  11: vest_dress
-  ID  17: sling
-  ID  25: short_sleeved_shirt
-  ID  60: short_sleeved_dress
-  ID  62: vest
-  ID  64: long_sleeved_dress
-  ID  67: trousers
-  ID  75: shorts
-  ID  78: long_sleeved_outwear
   ID  80: hand
-  ID  83: short_sleeved_outwear
-  ID  97: long_sleeved_shirt

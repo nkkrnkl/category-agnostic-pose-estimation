@@ -1,6 +1,5 @@
 import torch.utils.data
 
-from .poly_data import build as build_poly
 from .mp100_cape import build_mp100_cape
 
 
@@ -12,8 +11,8 @@ def build_dataset(image_set, args):
         print(f"Build MP-100 CAPE {image_set} dataset")
         return build_mp100_cape(image_set, args)
     elif args.dataset_name in ['stru3d', 'scenecad', 'rplan', 'cubicasa', 'waffle', 'r2g']:
-        print(f"Build {args.dataset_name} {image_set} dataset")
-        return build_poly(image_set, args)
+        raise ValueError(f'Polygon datasets not supported in CAPE. Only MP-100 is supported. '
+                        f'(poly_data.py was removed as part of CAPE implementation cleanup)')
     raise ValueError(f'dataset {args.dataset_name} not supported')
 
 def get_dataset_class_labels(dataset_name):

@@ -9,7 +9,7 @@ import numpy as np
 
 from util.misc import NestedTensor, nested_tensor_from_tensor_list, interpolate, inverse_sigmoid
 
-from datasets.poly_data import TokenType
+from datasets.token_types import TokenType
 from .backbone import build_backbone
 from .matcher import build_matcher
 from .losses import custom_L1_loss, MaskRasterizationLoss

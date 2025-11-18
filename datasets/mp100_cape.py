@@ -13,6 +13,8 @@ import os
 from copy import deepcopy
 import torchvision
 
+from .token_types import TokenType
+
 # Import transforms (with fallback if needed)
 try:
     from datasets.transforms import Resize, ResizeAndPad
@@ -205,11 +207,15 @@ class MP100CAPE(torch.utils.data.Dataset):
             record["keypoints"] = keypoints_list[0]
             record["category_id"] = category_ids[0]
             record["num_keypoints"] = num_keypoints_list[0]
+
+            # Get skeleton edges for this category
+            record["skeleton"] = self._get_skeleton_for_category(category_ids[0])
         else:
             # Empty annotation - use dummy values
             record["keypoints"] = [[0.0, 0.0]]
             record["category_id"] = 0
             record["num_keypoints"] = 1
+            record["skeleton"] = []
 
         # Apply transforms
         if self._transforms is not None:
@@ -235,6 +241,31 @@ class MP100CAPE(torch.utils.data.Dataset):
             delattr(self, '_current_category_id')
 
         return record
+
+    def _get_skeleton_for_category(self, category_id):
+        """
+        Get skeleton edges for a given category from COCO annotations.
+
+        Args:
+            category_id: Category ID
+
+        Returns:
+            List of [src, dst] edge pairs defining the skeleton structure.
+            Returns empty list if no skeleton defined for this category.
+        """
+        try:
+            # Get category info from COCO
+            cat_info = self.coco.loadCats(category_id)[0]
+
+            # MP-100 stores skeleton in 'skeleton' field
+            # Format: [[src1, dst1], [src2, dst2], ...]
+            skeleton = cat_info.get('skeleton', [])
+
+            return skeleton if skeleton else []
+
+        except Exception as e:
+            # If category not found or error, return empty skeleton
+            return []
 
     def _apply_transforms(self, img, record):
         """Apply image transformations and update keypoint coordinates"""
@@ -279,14 +310,6 @@ class MP100CAPE(torch.utils.data.Dataset):
             dict with tokenized sequence data
         """
         import math
-        from enum import Enum
-
-        # Token types: 0 for <coord>, 1 for <sep>, 2 for <eos>, 3 for <cls>
-        class TokenType(Enum):
-            coord = 0
-            sep = 1
-            eos = 2
-            cls = 3
 
         # Normalize keypoints to [0, 1]
         normalized_kpts = []
