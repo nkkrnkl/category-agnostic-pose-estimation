@@ -125,7 +125,7 @@ echo "Detected device: $DEVICE"
 echo ""
 if [ "$DEVICE" = "cuda:0" ]; then
     echo "✓ CUDA detected - Using GPU for training"
-    echo "  GPU: $(python3 -c 'import torch; print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else \"N/A\")')"
+    echo "  GPU: $(python3 -c 'import torch; print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else "N/A")')"
 else
     echo "Note: Using CPU (CUDA not available)"
     echo "      MPS is skipped due to deformable attention compatibility issues"

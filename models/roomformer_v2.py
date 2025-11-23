@@ -309,9 +309,25 @@ class RoomFormerV2(nn.Module):
         # 2. Encode Support Graph (Es) - NEW
         support_embeddings = None
         if self.cape_mode and support_graphs is not None:
-            # support_graphs should be (B, N, 2)
-            # support_mask should be (B, N) - True for valid keypoints, False for padding
-            support_embeddings = self.support_encoder(support_graphs, support_mask=support_mask)  # (B, N, 256)
+            # support_graphs should be (B_episodes, N, 2)
+            # support_mask should be (B_episodes, N) - True for valid keypoints, False for padding
+            support_embeddings = self.support_encoder(support_graphs, support_mask=support_mask)  # (B_episodes, N, 256)
+            
+            # Expand support_embeddings to match query batch size
+            # samples.tensors has shape (B_episodes * Q_queries, C, H, W)
+            # support_embeddings has shape (B_episodes, N, 256)
+            # We need to expand to (B_episodes * Q_queries, N, 256)
+            B_episodes = support_graphs.shape[0]
+            B_queries = bs  # bs = B_episodes * Q_queries
+            Q_queries = B_queries // B_episodes
+            
+            # Repeat each episode's support features Q_queries times
+            # (B_episodes, N, 256) -> (B_episodes * Q_queries, N, 256)
+            support_embeddings = support_embeddings.repeat_interleave(Q_queries, dim=0)
+            
+            # Also expand support_mask if needed (for potential future use)
+            if support_mask is not None:
+                support_mask = support_mask.repeat_interleave(Q_queries, dim=0)
         
         # 3. Pass to Transformer Decoder
         hs, init_reference, inter_references, inter_classes = self.transformer(
