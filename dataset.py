@@ -4,6 +4,7 @@ Handles loading, cropping, and normalization of keypoint annotations.
 """
 import os
 import json
+import random
 import numpy as np
 from PIL import Image
 import torch
@@ -46,21 +47,11 @@ class MP100Dataset(Dataset):
         self.images = {img['id']: img for img in coco_data['images']}
         self.categories = {cat['id']: cat for cat in coco_data['categories']}
 
-        # Filter out annotations with missing images
-        all_annotations = coco_data['annotations']
-        self.annotations = []
-        missing_count = 0
-
-        for ann in all_annotations:
-            img_info = self.images[ann['image_id']]
-            img_path = os.path.join(self.image_root, img_info['file_name'])
-            if os.path.exists(img_path):
-                self.annotations.append(ann)
-            else:
-                missing_count += 1
-
-        if missing_count > 0:
-            print(f"Warning: {missing_count} annotations skipped due to missing images")
+        # Load all annotations - file existence will be checked lazily during training
+        self.annotations = coco_data['annotations']
+        
+        # Track missing files to avoid repeated checks
+        self._missing_files = set()
 
         # Build category-to-instances mapping
         self.category_to_instances = {}
@@ -102,7 +93,7 @@ class MP100Dataset(Dataset):
 
     def __getitem__(self, idx):
         """
-        Get a single instance.
+        Get a single instance. If the file doesn't exist, tries to find a valid alternative.
 
         Returns:
             dict with keys:
@@ -120,6 +111,52 @@ class MP100Dataset(Dataset):
         # Load image
         img_info = self.images[ann['image_id']]
         img_path = os.path.join(self.image_root, img_info['file_name'])
+        
+        # Check if file exists - if not, try to find a valid alternative
+        if not os.path.exists(img_path):
+            # Mark this file as missing
+            self._missing_files.add(ann['image_id'])
+            
+            # Try to find another valid item from the same category
+            cat_id = ann['category_id']
+            category_instances = self.category_to_instances.get(cat_id, [])
+            
+            # Try up to 10 random instances from the same category
+            max_retries = min(10, len(category_instances))
+            for _ in range(max_retries):
+                alt_ann = random.choice(category_instances)
+                alt_img_info = self.images[alt_ann['image_id']]
+                alt_img_path = os.path.join(self.image_root, alt_img_info['file_name'])
+                
+                if os.path.exists(alt_img_path):
+                    # Use this alternative annotation
+                    ann = alt_ann
+                    img_info = alt_img_info
+                    img_path = alt_img_path
+                    break
+            else:
+                # If no valid alternative found, try any random annotation
+                # This is a fallback to avoid raising an error
+                max_fallback_retries = 100
+                for _ in range(max_fallback_retries):
+                    fallback_idx = random.randint(0, len(self.annotations) - 1)
+                    fallback_ann = self.annotations[fallback_idx]
+                    fallback_img_info = self.images[fallback_ann['image_id']]
+                    fallback_img_path = os.path.join(self.image_root, fallback_img_info['file_name'])
+                    
+                    if os.path.exists(fallback_img_path):
+                        ann = fallback_ann
+                        img_info = fallback_img_info
+                        img_path = fallback_img_path
+                        break
+                else:
+                    # Last resort: raise an error if we can't find any valid file
+                    raise FileNotFoundError(
+                        f"Could not find valid image file. Tried {max_retries} from category "
+                        f"{cat_id} and {max_fallback_retries} random files. "
+                        f"Original missing file: {img_path}"
+                    )
+        
         image = Image.open(img_path).convert('RGB')
 
         # Get bbox and keypoints
