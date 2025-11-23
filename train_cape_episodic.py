@@ -88,6 +88,8 @@ def get_args_parser():
     parser.add_argument('--nheads', default=8, type=int)
 
     # Sequence parameters
+    parser.add_argument('--poly2seq', action='store_true', default=True,
+                        help='Enable poly2seq mode (sequence-to-sequence for keypoints)')
     parser.add_argument('--num_queries', default=200, type=int)
     parser.add_argument('--seq_len', default=200, type=int)
     parser.add_argument('--num_polys', default=1, type=int)
@@ -179,13 +181,20 @@ def main(args):
     print(f"Queries per episode: {args.num_queries_per_episode}")
     print(f"Episodes per epoch: {args.episodes_per_epoch}\n")
 
-    # Auto-detect device
+    # Auto-detect device (prioritizes CUDA if available)
     if args.device is None:
         device = get_device()
         args.device = str(device)
     else:
         device = torch.device(args.device)
-    print(f"Using device: {device}\n")
+    
+    # Verify device and print info
+    print(f"Using device: {device}")
+    if device.type == 'cuda':
+        print(f"  GPU: {torch.cuda.get_device_name(0)}")
+        print(f"  CUDA Version: {torch.version.cuda}")
+        print(f"  GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
+    print()
 
     # Set random seed
     torch.manual_seed(args.seed)
@@ -203,6 +212,13 @@ def main(args):
     print("Wrapping with CAPE support conditioning...")
     model = build_cape_model(args, base_model)
     model.to(device)
+    
+    # Verify model is on correct device
+    model_device = next(model.parameters()).device
+    if model_device != device:
+        print(f"⚠️  Warning: Model device ({model_device}) doesn't match expected device ({device})")
+    else:
+        print(f"✓ Model moved to device: {model_device}")
 
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f'Total trainable parameters: {n_parameters:,}')

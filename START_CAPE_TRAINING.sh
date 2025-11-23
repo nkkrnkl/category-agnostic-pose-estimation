@@ -105,21 +105,31 @@ fi
 echo "✓ PyTorch found"
 echo ""
 
-# Detect device
+# Detect device (prioritizes CUDA if available)
 DEVICE=$(python3 -c "
 import torch
 import sys
 if torch.cuda.is_available():
     print('cuda:0')
-else:
-    # Use CPU instead of MPS due to deformable attention backward compatibility
+    sys.exit(0)
+elif torch.backends.mps.is_available():
+    # Skip MPS due to deformable attention backward compatibility
     print('cpu')
+    sys.exit(0)
+else:
+    print('cpu')
+    sys.exit(0)
 ")
 
 echo "Detected device: $DEVICE"
 echo ""
-echo "Note: Using CPU for compatibility with deformable attention"
-echo "      (MPS has issues with grid_sampler backward pass)"
+if [ "$DEVICE" = "cuda:0" ]; then
+    echo "✓ CUDA detected - Using GPU for training"
+    echo "  GPU: $(python3 -c 'import torch; print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else \"N/A\")')"
+else
+    echo "Note: Using CPU (CUDA not available)"
+    echo "      MPS is skipped due to deformable attention compatibility issues"
+fi
 echo ""
 
 # Launch training
