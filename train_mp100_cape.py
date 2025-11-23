@@ -26,8 +26,16 @@ def trivial_batch_collator(batch):
     """
     Split batch records into batched_inputs and batched_extras
     For MP-100 CAPE, we need to separate image/instances from sequence data
+    Filters out None values (failed image loads)
     """
     if not batch:
+        return [], {}
+
+    # Filter out None values (images that failed to load)
+    batch = [record for record in batch if record is not None]
+    
+    if not batch:
+        # If all samples in batch are None, return empty batch
         return [], {}
 
     batched_inputs = []
@@ -174,6 +182,8 @@ def get_args_parser():
                         type=str, help='Path to dataset root (contains data/ and annotations/)')
     parser.add_argument('--mp100_split', default=1, type=int, choices=[1, 2, 3, 4, 5],
                         help='Which MP-100 split to use (1-5)')
+    parser.add_argument('--gcs_bucket_name', default='dl-category-agnostic-pose-mp100-data', type=str,
+                        help='GCS bucket name for checking missing images (set to empty string to disable)')
 
     # Decoder architecture
     parser.add_argument('--dec_layer_type', default='v1', type=str,

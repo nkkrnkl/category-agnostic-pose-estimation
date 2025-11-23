@@ -13,6 +13,14 @@ import os
 from copy import deepcopy
 import torchvision
 
+# Google Cloud Storage support
+try:
+    from google.cloud import storage
+    GCS_AVAILABLE = True
+except ImportError:
+    GCS_AVAILABLE = False
+    print("Warning: google-cloud-storage not available. GCS bucket checks will be skipped.")
+
 # Import transforms (with fallback if needed)
 try:
     from datasets.transforms import Resize, ResizeAndPad
@@ -68,6 +76,54 @@ except ImportError:
 from datasets.discrete_tokenizer import DiscreteTokenizer, DiscreteTokenizerV2
 
 
+def _check_gcs_object_exists(bucket_name, blob_name):
+    """
+    Check if an object exists in a GCS bucket.
+    
+    Args:
+        bucket_name: Name of the GCS bucket
+        blob_name: Path to the object in the bucket (e.g., 'data/wren_body/0001.jpg')
+    
+    Returns:
+        bool: True if object exists, False otherwise
+    """
+    if not GCS_AVAILABLE:
+        return False
+    
+    try:
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(blob_name)
+        return blob.exists()
+    except Exception as e:
+        # If GCS check fails (e.g., authentication issues), return False
+        # This allows the code to continue with local-only checks
+        return False
+
+
+def _check_image_exists(local_path, gcs_bucket_name=None, gcs_blob_path=None):
+    """
+    Check if an image exists locally or in GCS bucket.
+    
+    Args:
+        local_path: Local file path
+        gcs_bucket_name: Optional GCS bucket name
+        gcs_blob_path: Optional GCS blob path (relative to bucket root)
+    
+    Returns:
+        bool: True if image exists locally or in GCS, False otherwise
+    """
+    # First check local file system
+    if os.path.exists(local_path):
+        return True
+    
+    # If not found locally, check GCS if configured
+    if gcs_bucket_name and gcs_blob_path:
+        return _check_gcs_object_exists(gcs_bucket_name, gcs_blob_path)
+    
+    return False
+
+
 class MP100CAPE(torch.utils.data.Dataset):
     """
     MP-100 Dataset for Category-Agnostic Pose Estimation
@@ -83,7 +139,7 @@ class MP100CAPE(torch.utils.data.Dataset):
 
     def __init__(self, img_folder, ann_file, transforms, semantic_classes=-1,
                  dataset_name='mp100', image_norm=False, poly2seq=True,
-                 converter_version='v3', split='train', **kwargs):
+                 converter_version='v3', split='train', gcs_bucket_name=None, **kwargs):
         super(MP100CAPE, self).__init__()
 
         self.root = img_folder
@@ -91,9 +147,13 @@ class MP100CAPE(torch.utils.data.Dataset):
         self.semantic_classes = semantic_classes
         self.dataset_name = dataset_name
         self.split = split
+        # Set GCS bucket name, but only if not empty string
+        gcs_bucket = gcs_bucket_name or kwargs.get('gcs_bucket_name', None)
+        self.gcs_bucket_name = gcs_bucket if gcs_bucket else None
 
         # Load COCO format annotations
         self.coco = COCO(ann_file)
+        # Keep all image IDs - filtering will happen during training in __getitem__
         self.ids = list(sorted(self.coco.imgs.keys()))
 
         # For CAPE, we always use poly2seq (keypoint sequence representation)
@@ -117,7 +177,7 @@ class MP100CAPE(torch.utils.data.Dataset):
             num_bins = int(np.sqrt(vocab_size))
             self.tokenizer = DiscreteTokenizerV2(num_bins=num_bins, seq_len=seq_len, add_cls=False)
 
-        print(f"Loaded MP-100 {split} dataset: {len(self.ids)} images")
+        print(f"Loaded MP-100 {split} dataset: {len(self.ids)} images (missing images will be skipped during training)")
 
     def get_vocab_size(self):
         if self.poly2seq:
@@ -164,7 +224,51 @@ class MP100CAPE(torch.utils.data.Dataset):
         path = img_info['file_name']
         file_name = os.path.join(self.root, path)
 
-        img = np.array(Image.open(file_name).convert('RGB'))
+        # Construct GCS blob path if bucket is configured
+        gcs_blob_path = None
+        if self.gcs_bucket_name:
+            # Remove 'data/' prefix if present
+            clean_path = path
+            if clean_path.startswith('data/'):
+                clean_path = clean_path[5:]
+            gcs_blob_path = clean_path
+
+        # Check if file exists locally or in GCS bucket
+        if not _check_image_exists(file_name, self.gcs_bucket_name, gcs_blob_path):
+            location_info = f" (local: {file_name}"
+            if self.gcs_bucket_name:
+                location_info += f", GCS: gs://{self.gcs_bucket_name}/{gcs_blob_path or path}"
+            location_info += ")"
+            print(f"Warning: Image file not found at index {index}{location_info}")
+            # Return None to be filtered out by collator
+            return None
+        
+        try:
+            img = np.array(Image.open(file_name).convert('RGB'))
+        except (IOError, OSError, FileNotFoundError) as e:
+            # If local file fails and GCS is available, try downloading from GCS
+            if self.gcs_bucket_name and gcs_blob_path and not os.path.exists(file_name):
+                try:
+                    if GCS_AVAILABLE:
+                        client = storage.Client()
+                        bucket = client.bucket(self.gcs_bucket_name)
+                        blob = bucket.blob(gcs_blob_path)
+                        
+                        # Download to local path
+                        os.makedirs(os.path.dirname(file_name), exist_ok=True)
+                        blob.download_to_filename(file_name)
+                        
+                        # Now try loading again
+                        img = np.array(Image.open(file_name).convert('RGB'))
+                    else:
+                        raise e
+                except Exception as gcs_error:
+                    print(f"Warning: Failed to load/download image at index {index}: {file_name}, error: {e}, GCS error: {gcs_error}")
+                    return None
+            else:
+                print(f"Warning: Failed to load image at index {index}: {file_name}, error: {e}")
+                # Return None to be filtered out by collator
+                return None
 
         # Handle image dimensions
         if len(img.shape) >= 3:
@@ -409,6 +513,15 @@ def build_mp100_cape(image_set, args):
     else:
         transforms = Resize((256, 256))
 
+    # Get GCS bucket name from args if provided
+    gcs_bucket_name = getattr(args, 'gcs_bucket_name', None)
+    # If empty string is provided, disable GCS checks
+    if gcs_bucket_name == '':
+        gcs_bucket_name = None
+    # Default bucket name if not specified (and not explicitly disabled)
+    elif gcs_bucket_name is None:
+        gcs_bucket_name = 'dl-category-agnostic-pose-mp100-data'  # Default from sync script
+    
     dataset = MP100CAPE(
         img_folder=str(root),
         ann_file=str(ann_file),
@@ -420,7 +533,8 @@ def build_mp100_cape(image_set, args):
         converter_version='v3',
         split=image_set,
         vocab_size=args.vocab_size,
-        seq_len=args.seq_len
+        seq_len=args.seq_len,
+        gcs_bucket_name=gcs_bucket_name
     )
 
     return dataset

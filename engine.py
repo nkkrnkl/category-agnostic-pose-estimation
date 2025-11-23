@@ -77,6 +77,10 @@ def train_one_epoch(
     for batched_inputs, batched_extras in metric_logger.log_every(
         data_loader, print_freq, header
     ):
+        # Skip empty batches (can occur if all images in batch failed to load)
+        if not batched_inputs or len(batched_inputs) == 0:
+            continue
+        
         samples = [x["image"].to(device) for x in batched_inputs]
         # Handle instances (may be None for datasets like MP-100 CAPE)
         gt_instances = [
@@ -176,6 +180,10 @@ def evaluate(
     for batched_inputs, batched_extras in metric_logger.log_every(
         data_loader, 10, header
     ):
+        # Skip empty batches (can occur if all images in batch failed to load)
+        if not batched_inputs or len(batched_inputs) == 0:
+            continue
+        
         samples = [x["image"].to(device) for x in batched_inputs]
         scene_ids = [x["image_id"] for x in batched_inputs]
         gt_instances = [
