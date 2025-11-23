@@ -977,6 +977,44 @@ class TransformerDecoder(nn.Module):
     def with_pos_embed(tensor, pos):
         return tensor if pos is None else tensor + pos[:, :tensor.size(1)]
 
+    def _apply_support_fusion(self, output, layer_id):
+        """Apply support fusion based on fusion method type.
+
+        Args:
+            output: Decoder hidden states [B, L, D]
+            layer_id: Current decoder layer index
+
+        Returns:
+            Fused output [B, L, D]
+        """
+        if self.support_fusion_method == 'cross_attention':
+            # Cross-attention to support features
+            attn_out, _ = self.support_cross_attn_layers[layer_id](
+                query=output,
+                key=self.support_features,
+                value=self.support_features,
+                key_padding_mask=~self.support_mask.bool() if self.support_mask is not None else None
+            )
+            output = self.support_attn_norms[layer_id](output + attn_out)
+
+        elif self.support_fusion_method == 'concat':
+            # Concatenate with global support
+            B, L, D = output.shape
+            support_expanded = self.support_global.unsqueeze(1).expand(B, L, D)
+            concat_feat = torch.cat([output, support_expanded], dim=-1)
+            output = self.support_concat_proj[layer_id](concat_feat)
+
+        elif self.support_fusion_method == 'add':
+            # Gated additive fusion
+            B, L, D = output.shape
+            support_expanded = self.support_global.unsqueeze(1).expand(B, L, D)
+            gate_input = torch.cat([output, support_expanded], dim=-1)
+            gate = self.support_gates[layer_id](gate_input)
+            output = gate * support_expanded + (1 - gate) * output
+            output = self.support_add_norms[layer_id](output)
+
+        return output
+
     def forward(self, tgt, reference_points, src, src_flatten, src_spatial_shapes, src_level_start_index, src_valid_ratios,
                 query_pos=None, src_padding_mask=None, tgt_masks=None, seq_kwargs=None, force_simple_returns=False, 
                 pre_decoder_pos_embed=False, attn_concat_src=False,
@@ -1027,14 +1065,18 @@ class TransformerDecoder(nn.Module):
                         query_pos = None
             else:
                 reference_points_input = None
-            output, src_tmp = layer(output, query_pos, 
-                           reference_points_input, src, 
-                           src_spatial_shapes, src_level_start_index, src_padding_mask, 
+            output, src_tmp = layer(output, query_pos,
+                           reference_points_input, src,
+                           src_spatial_shapes, src_level_start_index, src_padding_mask,
                            tgt_masks, attn_concat_src=attn_concat_src,
                            input_pos=decode_token_pos)
             if src_tmp is not None:
                 src = src_tmp
-    
+
+            # CAPE: Apply support fusion after each decoder layer
+            if hasattr(self, 'support_fusion_method') and self.support_fusion_method is not None:
+                output = self._apply_support_fusion(output, lid)
+
             # iterative polygon refinement
             if self.poly_refine:
                 offset = self.coords_embed[lid](output)

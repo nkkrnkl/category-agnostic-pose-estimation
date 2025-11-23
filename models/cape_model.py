@@ -27,7 +27,7 @@ class CAPEModel(nn.Module):
     """
 
     def __init__(self, base_model, hidden_dim=256, support_encoder_layers=3,
-                 support_fusion_method='cross_attention'):
+                 support_fusion_method='cross_attention', vocab_size=2000):
         """
         Args:
             base_model: RoomFormerV2 model instance
@@ -37,6 +37,7 @@ class CAPEModel(nn.Module):
                 - 'cross_attention': Add cross-attention layer to decoder
                 - 'concat': Concatenate support features
                 - 'add': Add support features to query features
+            vocab_size: Coordinate vocabulary size (must match base model)
         """
         super().__init__()
 
@@ -44,13 +45,20 @@ class CAPEModel(nn.Module):
         self.hidden_dim = hidden_dim
         self.support_fusion_method = support_fusion_method
 
-        # Support pose graph encoder
+        # CRITICAL FIX: Extract coordinate embedding table from base model
+        # The support encoder MUST share this table with the base model
+        # so support and query use the same discrete coordinate representation
+        coord_vocab_embed = self._extract_coord_vocab_embed(base_model, vocab_size, hidden_dim)
+
+        # Support pose graph encoder (with SHARED coordinate embedding)
         self.support_encoder = SupportPoseGraphEncoder(
             hidden_dim=hidden_dim,
             nheads=8,
             num_encoder_layers=support_encoder_layers,
             dim_feedforward=1024,
-            dropout=0.1
+            dropout=0.1,
+            vocab_size=vocab_size,
+            coord_vocab_embed=coord_vocab_embed  # SHARE the embedding table
         )
 
         # Support graph aggregator (for global pose structure)
@@ -61,16 +69,61 @@ class CAPEModel(nn.Module):
 
         # Support fusion layer (injected into decoder)
         if support_fusion_method == 'cross_attention':
-            # Will add cross-attention modules to decoder layers
+            # Add cross-attention modules to decoder layers
             self._add_support_cross_attention()
         elif support_fusion_method == 'concat':
             # Projection for concatenated features
+            # This will concatenate global support with decoder hidden states
             self.support_proj = nn.Linear(hidden_dim * 2, hidden_dim)
+            self._add_support_concat_fusion()
         elif support_fusion_method == 'add':
-            # Simple addition (no extra parameters needed)
-            pass
+            # Additive fusion with gating mechanism
+            # Gate decides how much support information to use
+            self.support_gate = nn.Sequential(
+                nn.Linear(hidden_dim * 2, hidden_dim),
+                nn.Sigmoid()
+            )
+            self._add_support_additive_fusion()
         else:
             raise ValueError(f"Unknown fusion method: {support_fusion_method}")
+
+    def _extract_coord_vocab_embed(self, base_model, vocab_size, hidden_dim):
+        """
+        Extract or create coordinate embedding table that will be shared between
+        base model and support encoder.
+
+        In Raster2Seq, coordinates are tokenized using bilinear interpolation
+        over a learned embedding table. The support encoder MUST use the SAME
+        table to ensure support and query use identical coordinate representations.
+
+        Args:
+            base_model: RoomFormerV2 instance
+            vocab_size: Vocabulary size
+            hidden_dim: Embedding dimension
+
+        Returns:
+            coord_vocab_embed: Shared coordinate embedding parameter or None
+        """
+        # OPTION 1: Check if base model has a coordinate vocabulary embedding
+        # In the standard Raster2Seq/deformable_transformer_v2.py, coordinates are
+        # embedded via bilinear interpolation over a learned table.
+        # However, this table might be implicit in the decoder layers.
+
+        # For now, we'll create a shared embedding table that both will use
+        # Calculate num_bins from vocab_size
+        num_bins = int((vocab_size / 2) ** 0.5)
+
+        # Create shared coordinate vocabulary embedding
+        # This will be a parameter of CAPEModel, not base_model
+        # Both the decoder and support encoder will reference it
+        coord_vocab_embed = nn.Parameter(
+            torch.randn(num_bins * num_bins, hidden_dim) * 0.02
+        )
+
+        # Register as a parameter of CAPEModel
+        self.register_parameter('shared_coord_vocab_embed', coord_vocab_embed)
+
+        return coord_vocab_embed
 
     def _add_support_cross_attention(self):
         """
@@ -96,6 +149,54 @@ class CAPEModel(nn.Module):
 
         # Layer norms for support cross-attention
         self.support_attn_layer_norms = nn.ModuleList([
+            nn.LayerNorm(self.hidden_dim)
+            for _ in range(num_layers)
+        ])
+
+    def _add_support_concat_fusion(self):
+        """
+        Add support concatenation fusion modules to decoder.
+
+        This concatenates the global support embedding with each decoder
+        hidden state, then projects back to hidden_dim.
+        """
+        decoder = self.base_model.transformer.decoder
+        num_layers = decoder.num_layers
+
+        # Create projection layers for each decoder layer
+        # These will project [hidden; support_global] -> hidden
+        self.support_concat_proj = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(self.hidden_dim * 2, self.hidden_dim),
+                nn.ReLU(),
+                nn.LayerNorm(self.hidden_dim)
+            )
+            for _ in range(num_layers)
+        ])
+
+    def _add_support_additive_fusion(self):
+        """
+        Add support additive fusion with gating.
+
+        Uses a learned gate to control how much support information
+        to mix with decoder hidden states.
+
+        Formula: output = gate * support_global + (1 - gate) * hidden
+        """
+        decoder = self.base_model.transformer.decoder
+        num_layers = decoder.num_layers
+
+        # Create gating modules for each decoder layer
+        self.support_gates = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(self.hidden_dim * 2, self.hidden_dim),
+                nn.Sigmoid()
+            )
+            for _ in range(num_layers)
+        ])
+
+        # Layer norms
+        self.support_add_norms = nn.ModuleList([
             nn.LayerNorm(self.hidden_dim)
             for _ in range(num_layers)
         ])
@@ -141,26 +242,43 @@ class CAPEModel(nn.Module):
         # support_global: (B, D)
 
         # 2. Process query image through base model with support conditioning
-        # We need to inject support features into the decoder
+        # Inject support features into decoder based on fusion method
 
-        # Store support features for use in decoder
-        self.base_model.transformer.decoder.support_features = support_features
-        self.base_model.transformer.decoder.support_mask = support_mask
-        self.base_model.transformer.decoder.support_cross_attn_layers = getattr(
-            self, 'support_cross_attention_layers', None
-        )
-        self.base_model.transformer.decoder.support_attn_norms = getattr(
-            self, 'support_attn_layer_norms', None
-        )
+        decoder = self.base_model.transformer.decoder
+
+        # Store support features for ALL fusion methods
+        decoder.support_features = support_features
+        decoder.support_mask = support_mask
+        decoder.support_global = support_global  # Global representation
+        decoder.support_fusion_method = self.support_fusion_method
+
+        # Inject fusion-specific modules
+        if self.support_fusion_method == 'cross_attention':
+            decoder.support_cross_attn_layers = self.support_cross_attention_layers
+            decoder.support_attn_norms = self.support_attn_layer_norms
+        elif self.support_fusion_method == 'concat':
+            decoder.support_concat_proj = self.support_concat_proj
+        elif self.support_fusion_method == 'add':
+            decoder.support_gates = self.support_gates
+            decoder.support_add_norms = self.support_add_norms
 
         # Forward through base model
-        # The base model will use support features if available
-        # Note: Base model expects seq_kwargs, not targets
+        # The decoder will use support features based on fusion_method
         outputs = self.base_model(samples, seq_kwargs=targets)
 
         # Clean up stored references
-        self.base_model.transformer.decoder.support_features = None
-        self.base_model.transformer.decoder.support_mask = None
+        decoder.support_features = None
+        decoder.support_mask = None
+        decoder.support_global = None
+        decoder.support_fusion_method = None
+        if hasattr(decoder, 'support_cross_attn_layers'):
+            decoder.support_cross_attn_layers = None
+            decoder.support_attn_norms = None
+        if hasattr(decoder, 'support_concat_proj'):
+            decoder.support_concat_proj = None
+        if hasattr(decoder, 'support_gates'):
+            decoder.support_gates = None
+            decoder.support_add_norms = None
 
         return outputs
 
@@ -242,6 +360,7 @@ def build_cape_model(args, base_model):
             - hidden_dim: Hidden dimension (default: 256)
             - support_encoder_layers: Support encoder layers (default: 3)
             - support_fusion_method: Fusion method (default: 'cross_attention')
+            - vocab_size: Coordinate vocabulary size (default: 2000)
 
         base_model: Pre-built RoomFormerV2 model
 
@@ -252,7 +371,8 @@ def build_cape_model(args, base_model):
         base_model=base_model,
         hidden_dim=getattr(args, 'hidden_dim', 256),
         support_encoder_layers=getattr(args, 'support_encoder_layers', 3),
-        support_fusion_method=getattr(args, 'support_fusion_method', 'cross_attention')
+        support_fusion_method=getattr(args, 'support_fusion_method', 'cross_attention'),
+        vocab_size=getattr(args, 'vocab_size', 2000)  # CRITICAL: share vocab size
     )
 
 

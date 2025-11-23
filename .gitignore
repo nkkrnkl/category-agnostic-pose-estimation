@@ -18,6 +18,7 @@ outputs/
 *.ckpt
 checkpoints/
 visualizations/
+papers/
 
 # Logs
 *.log

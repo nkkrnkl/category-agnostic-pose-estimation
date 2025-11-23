@@ -276,6 +276,30 @@ def episodic_collate_fn(batch):
     support_coords = torch.stack(support_coords_padded)  # (B, max_kpts, 2)
     support_masks = torch.stack(support_masks_padded)  # (B, max_kpts)
 
+    # CRITICAL FIX: Repeat support for each query
+    # Each episode has 1 support but Q queries
+    # Total queries: B*Q, Total supports: B
+    # Need to repeat each support Q times to match query batch size
+    num_episodes = len(batch)
+    num_queries_total = len(query_images_list)
+    num_queries_per_episode = num_queries_total // num_episodes
+
+    # Repeat support coords, masks, and skeletons for each query
+    support_coords_repeated = []
+    support_masks_repeated = []
+    support_skeletons_repeated = []
+
+    for i in range(num_episodes):
+        # Repeat this episode's support for all its queries
+        for _ in range(num_queries_per_episode):
+            support_coords_repeated.append(support_coords[i])
+            support_masks_repeated.append(support_masks[i])
+            support_skeletons_repeated.append(support_skeletons[i])
+
+    support_coords = torch.stack(support_coords_repeated)  # (B*Q, max_kpts, 2)
+    support_masks = torch.stack(support_masks_repeated)  # (B*Q, max_kpts)
+    # support_skeletons_repeated is now a list of length B*Q
+
     # Stack query images
     query_images = torch.stack(query_images_list)  # (B*Q, C, H, W)
 
@@ -285,13 +309,13 @@ def episodic_collate_fn(batch):
         batched_seq_data[key] = torch.stack([qt[key] for qt in query_targets_list])
 
     return {
-        'support_images': support_images,
-        'support_coords': support_coords,
-        'support_masks': support_masks,
-        'support_skeletons': support_skeletons,  # List of skeleton edge lists
-        'query_images': query_images,
-        'query_targets': batched_seq_data,
-        'category_ids': torch.tensor(category_ids, dtype=torch.long)
+        'support_images': support_images,  # (B, C, H, W) - kept for compatibility
+        'support_coords': support_coords,  # (B*Q, max_kpts, 2) - repeated
+        'support_masks': support_masks,    # (B*Q, max_kpts) - repeated
+        'support_skeletons': support_skeletons_repeated,  # List of length B*Q - repeated
+        'query_images': query_images,      # (B*Q, C, H, W)
+        'query_targets': batched_seq_data, # batch_size = B*Q
+        'category_ids': torch.tensor(category_ids, dtype=torch.long)  # (B,) - per episode
     }
 
 
