@@ -154,9 +154,14 @@ class CAPEModel(nn.Module):
         )
 
         # Forward through base model
-        # The base model will use support features if available
-        # Note: Base model expects seq_kwargs, not targets
-        outputs = self.base_model(samples, seq_kwargs=targets)
+        # If base model has cape_mode, pass support_graphs directly
+        # Otherwise, use the old method of storing support_features in decoder
+        if hasattr(self.base_model, 'cape_mode') and self.base_model.cape_mode:
+            # New implementation: pass support_graphs and support_mask directly
+            outputs = self.base_model(samples, seq_kwargs=targets, support_graphs=support_coords, support_mask=support_mask)
+        else:
+            # Old implementation: store support_features in decoder
+            outputs = self.base_model(samples, seq_kwargs=targets)
 
         # Clean up stored references
         self.base_model.transformer.decoder.support_features = None

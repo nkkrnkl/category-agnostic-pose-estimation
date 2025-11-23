@@ -130,6 +130,8 @@ echo ""
 
 python3 train_cape_episodic.py \
     --cape_mode \
+    --poly2seq \
+    --dataset_name mp100 \
     --dataset_root "$SCRIPT_DIR" \
     --category_split_file "category_splits.json" \
     --output_dir "$OUTPUT_DIR" \

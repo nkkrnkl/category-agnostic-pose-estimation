@@ -32,11 +32,67 @@ def _get_clones(module, N):
     return nn.ModuleList([copy.deepcopy(module) for i in range(N)])
 
 
+class SupportPoseEncoder(nn.Module):
+    """
+    Encodes the Support Pose Graph (Gc) as described in the report.
+    
+    Input: Flattened 2D coordinates of template keypoints (B, N_kps, 2)
+    Output: Contextual Support Embeddings Es (B, N_kps, Hidden_Dim)
+    """
+    def __init__(self, hidden_dim=256, nhead=8, num_layers=3):
+        super().__init__()
+        
+        # Project 2D coordinates (x,y) to Hidden Dim
+        self.input_proj = nn.Linear(2, hidden_dim)
+        
+        # Positional encoding for the keypoint indices (semantic identity)
+        self.kps_pos_embed = nn.Embedding(100, hidden_dim)  # Max 100 keypoints
+        
+        # 3-Layer Transformer Encoder
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=hidden_dim, 
+            nhead=nhead, 
+            dim_feedforward=1024, 
+            dropout=0.1,
+            batch_first=True
+        )
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+    
+    def forward(self, support_coords, support_mask=None):
+        """
+        support_coords: (B, N_kps, 2) - Normalized template coordinates
+        support_mask: (B, N_kps) - Boolean mask, True for valid keypoints, False for padding
+                     If None, assumes all keypoints are valid
+        """
+        # 1. Embed coordinates
+        x = self.input_proj(support_coords)  # (B, N, 256)
+        
+        # 2. Add semantic positional embedding (index 0 is always keypoint 0, etc.)
+        B, N, _ = x.shape
+        pos = self.kps_pos_embed(torch.arange(N, device=x.device).unsqueeze(0).expand(B, -1))
+        x = x + pos
+        
+        # 3. Prepare padding mask for transformer
+        # Transformer expects src_key_padding_mask where True = positions to ignore (padding)
+        # Our mask is True for valid, False for padding, so we need to invert it
+        if support_mask is not None:
+            # Invert: True (valid) -> False (don't mask), False (padding) -> True (mask)
+            src_key_padding_mask = ~support_mask  # (B, N)
+        else:
+            src_key_padding_mask = None
+        
+        # 4. Pass through Transformer with padding mask
+        # Output: Es (B, N, 256)
+        support_features = self.transformer_encoder(x, src_key_padding_mask=src_key_padding_mask)
+        return support_features
+
+
 class RoomFormerV2(nn.Module):
     """ This is the RoomFormer module that performs floorplan reconstruction """
     def __init__(self, backbone, transformer, num_classes, num_queries, num_polys, num_feature_levels,
                  aux_loss=True, with_poly_refine=False, masked_attn=False, semantic_classes=-1, seq_len=1024, tokenizer=None,
                  use_anchor=False, patch_size=1, freeze_anchor=False, inject_cls_embed=False,
+                 cape_mode=False
                  ):
         """ Initializes the model.
         Parameters:
@@ -57,6 +113,7 @@ class RoomFormerV2(nn.Module):
         self.transformer = transformer
         hidden_dim = transformer.d_model
         self.num_classes = num_classes
+        self.cape_mode = cape_mode
 
 
         self.class_embed = nn.Linear(hidden_dim, num_classes)
@@ -148,6 +205,13 @@ class RoomFormerV2(nn.Module):
         #     self.attention_mask = None
 
         self.register_buffer('attention_mask', self._create_causal_attention_mask(seq_len))
+        
+        # --- NEW: Initialize Support Encoder if in CAPE mode ---
+        if self.cape_mode:
+            print("Initializing CAPE Support Pose Encoder...")
+            self.support_encoder = SupportPoseEncoder(hidden_dim=hidden_dim, num_layers=3)
+            # You might need a projection layer if you plan to concatenate features
+            self.fusion_proj = nn.Linear(hidden_dim * 2, hidden_dim)
 
     def _create_causal_attention_mask(self, seq_len):
         """
@@ -159,7 +223,7 @@ class RoomFormerV2(nn.Module):
         causal_mask = mask.masked_fill(mask == 1, float('-inf')).masked_fill(mask == 0, 0.0)
         return causal_mask
 
-    def forward(self, samples: NestedTensor, seq_kwargs=None):
+    def forward(self, samples: NestedTensor, seq_kwargs=None, support_graphs=None, support_mask=None):
         """ The forward expects a NestedTensor, which consists of:
                - samples.tensors: batched images, of shape [batch_size x C x H x W]
                - samples.mask: a binary mask of shape [batch_size x H x W], containing 1 on padded pixels
@@ -207,7 +271,18 @@ class RoomFormerV2(nn.Module):
         # tgt_embeds = self.tgt_embed.weight
         tgt_embeds = None
         
-        hs, init_reference, inter_references, inter_classes = self.transformer(srcs, masks, pos, query_embeds, tgt_embeds, self.attention_mask, seq_kwargs)
+        # 2. Encode Support Graph (Es) - NEW
+        support_embeddings = None
+        if self.cape_mode and support_graphs is not None:
+            # support_graphs should be (B, N, 2)
+            # support_mask should be (B, N) - True for valid keypoints, False for padding
+            support_embeddings = self.support_encoder(support_graphs, support_mask=support_mask)  # (B, N, 256)
+        
+        # 3. Pass to Transformer Decoder
+        hs, init_reference, inter_references, inter_classes = self.transformer(
+            srcs, masks, pos, query_embeds, tgt_embeds, self.attention_mask, seq_kwargs,
+            support_features=support_embeddings
+        )
 
         num_layer = hs.shape[0]
         outputs_class = inter_classes # inter_classes.reshape(num_layer, bs, -1, inter_classes.size(3))
@@ -248,7 +323,7 @@ class RoomFormerV2(nn.Module):
             gen_out, input_polygon_labels
         )
 
-    def forward_inference(self, samples: NestedTensor, use_cache=True):
+    def forward_inference(self, samples: NestedTensor, use_cache=True, support_graphs=None, support_mask=None):
         """ The forward expects a NestedTensor, which consists of:
                - samples.tensors: batched images, of shape [batch_size x C x H x W]
                - samples.mask: a binary mask of shape [batch_size x H x W], containing 1 on padded pixels
@@ -264,9 +339,18 @@ class RoomFormerV2(nn.Module):
         """
         if not isinstance(samples, NestedTensor):
             samples = nested_tensor_from_tensor_list(samples)
+        
+        # 1. Encode Image (Fq)
         features, pos = self.backbone(samples)
 
         bs = samples.tensors.shape[0]
+        
+        # 2. Encode Support Graph (Es) - NEW for CAPE mode
+        support_embeddings = None
+        if self.cape_mode and support_graphs is not None:
+            # support_graphs should be (B, N, 2)
+            # support_mask should be (B, N) - True for valid keypoints, False for padding
+            support_embeddings = self.support_encoder(support_graphs, support_mask=support_mask)  # (B, N, 256)
 
         srcs = []
         masks = []
@@ -343,13 +427,15 @@ class RoomFormerV2(nn.Module):
             if not use_cache:
                 hs, _, reg_output, cls_output = self.transformer(srcs, masks, pos, query_embeds, tgt_embeds, None, 
                                                                                     seq_kwargs, force_simple_returns=True, return_enc_cache=use_cache, 
-                                                                                    enc_cache=None, decode_token_pos=None)
+                                                                                    enc_cache=None, decode_token_pos=None,
+                                                                                    support_features=support_embeddings)
                 output_hs_list.append(hs[:, i:i+1])
             else:
                 decode_token_pos = torch.tensor([i], device=device, dtype=torch.long)
                 hs, _, reg_output, cls_output, enc_cache = self.transformer(srcs, masks, pos, query_embeds, tgt_embeds, None, 
                                                                                     seq_kwargs, force_simple_returns=True, return_enc_cache=use_cache, 
-                                                                                    enc_cache=enc_cache, decode_token_pos=decode_token_pos)
+                                                                                    enc_cache=enc_cache, decode_token_pos=decode_token_pos,
+                                                                                    support_features=support_embeddings)
                 output_hs_list.append(hs)
             cls_type = torch.argmax(cls_output, 2)
             # print(cls_type, torch.softmax(cls_output, dim=2)[:, :, cls_type], torch.topk(torch.softmax(cls_output, dim=2), k=3))
@@ -702,13 +788,10 @@ class SetCriterion(nn.Module):
 
         if 'enc_outputs' in outputs:
             enc_outputs = outputs['enc_outputs']
-            # bin_targets = copy.deepcopy(targets)
-            # for bt in bin_targets:
-            #     bt['labels'] = torch.zeros_like(bt['labels'])
-            # indices = self.matcher(enc_outputs, bin_targets)
-            indices = self.matcher(enc_outputs, targets)
+            # For pose estimation, we don't need matching - order is fixed
+            # (1st output token = 1st keypoint, etc.)
+            indices = None
             for loss in self.losses:
-                # l_dict = self.get_loss(loss, enc_outputs, bin_targets, indices)
                 l_dict = self.get_loss(loss, enc_outputs, targets, indices)
                 l_dict = {k + f'_enc': v for k, v in l_dict.items()}
                 losses.update(l_dict)
@@ -731,7 +814,7 @@ class MLP(nn.Module):
         return x
 
 
-def build(args, train=True, tokenizer=None):
+def build(args, train=True, tokenizer=None, cape_mode=False):
     num_classes = 3 if not args.add_cls_token else 4 # <coord> <sep> <eos> <cls>
     if tokenizer is not None:
         pad_idx = tokenizer.pad
@@ -758,6 +841,7 @@ def build(args, train=True, tokenizer=None):
             patch_size=[1, 2][args.image_size == 512], # 1 for 256x256, 2 for 512x512
             freeze_anchor=getattr(args, 'freeze_anchor', False),
             inject_cls_embed=getattr(args, 'inject_cls_embed', False),
+            cape_mode=cape_mode,
         )
     else:
         model = Raster2Seq(
