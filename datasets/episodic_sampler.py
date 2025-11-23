@@ -177,9 +177,11 @@ class EpisodicDataset(data.Dataset):
                 - query_targets: List of query keypoint targets (seq_data)
                 - category_id: Category ID
         """
-        max_retries = 10  # Maximum number of retries to find a valid episode
+        # Keep trying until we find a valid episode (skip missing images)
+        max_retries = 100  # High limit to prevent infinite loops, but should rarely be hit
+        retry_count = 0
         
-        for retry in range(max_retries):
+        while retry_count < max_retries:
             try:
                 # Sample episode
                 episode = self.sampler.sample_episode()
@@ -218,6 +220,7 @@ class EpisodicDataset(data.Dataset):
                         'num_keypoints': query_data['num_keypoints']
                     })
 
+                # Successfully loaded all images - return the episode
                 return {
                     'support_image': support_data['image'],
                     'support_coords': support_coords,
@@ -229,13 +232,16 @@ class EpisodicDataset(data.Dataset):
                     'category_id': episode['category_id']
                 }
             except ImageNotFoundError as e:
-                # If image is missing, retry with a different episode
-                if retry < max_retries - 1:
-                    continue  # Try again with a different episode
-                else:
-                    # If we've exhausted retries, raise the error
-                    raise RuntimeError(f"Failed to find valid episode after {max_retries} retries. "
-                                     f"Last error: {e}")
+                # If image is missing, skip and try a different episode
+                retry_count += 1
+                # Only print warning every 10 retries to avoid spam
+                if retry_count % 10 == 0:
+                    print(f"Warning: Skipping episode due to missing image (attempt {retry_count})...")
+                continue  # Skip and try again with a different episode
+        
+        # If we've exhausted retries (should be very rare), raise an error
+        raise RuntimeError(f"Failed to find valid episode after {max_retries} attempts. "
+                         f"This may indicate too many missing images in the dataset.")
 
 
 def episodic_collate_fn(batch):
