@@ -145,7 +145,8 @@ class SupportPoseGraphEncoder(nn.Module):
         # True values are ignored in attention
         if support_mask is not None:
             # Invert mask: valid=True -> padding=False for attention
-            attn_mask = ~support_mask
+            # Convert to bool first to handle float masks
+            attn_mask = ~support_mask.bool()
         else:
             attn_mask = None
 

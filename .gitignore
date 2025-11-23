@@ -17,6 +17,7 @@ outputs/
 *.pth
 *.ckpt
 checkpoints/
+visualizations/
 
 # Logs
 *.log

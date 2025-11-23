@@ -195,8 +195,25 @@ class CAPEModel(nn.Module):
         # Generate sequence
         # Note: This would need to be implemented in the base model's decoder
         # For now, we'll use the forward pass and take argmax
+        # Create dummy seq_kwargs for inference (model expects these but we don't use them)
+        B = samples.shape[0] if isinstance(samples, torch.Tensor) else len(samples)
+        device = support_coords.device
+        seq_len = 200  # Default sequence length
+
+        dummy_seq_kwargs = {
+            'seq11': torch.zeros((B, seq_len), dtype=torch.long, device=device),
+            'seq12': torch.zeros((B, seq_len), dtype=torch.long, device=device),
+            'seq21': torch.zeros((B, seq_len), dtype=torch.long, device=device),  # Token indices, not coords
+            'seq22': torch.zeros((B, seq_len), dtype=torch.long, device=device),  # Token indices, not coords
+            'target_seq': torch.zeros((B, seq_len), dtype=torch.long, device=device),
+            'delta_x1': torch.zeros((B, seq_len), dtype=torch.long, device=device),
+            'delta_x2': torch.zeros((B, seq_len), dtype=torch.long, device=device),
+            'delta_y1': torch.zeros((B, seq_len), dtype=torch.long, device=device),
+            'delta_y2': torch.zeros((B, seq_len), dtype=torch.long, device=device),
+        }
+
         with torch.no_grad():
-            outputs = self.base_model(samples, seq_kwargs=None)
+            outputs = self.base_model(samples, seq_kwargs=dummy_seq_kwargs)
 
         # Clean up
         self.base_model.transformer.decoder.support_features = None
