@@ -1,0 +1,401 @@
+PROJECT SPECIFICATION — CATEGORY-AGNOSTIC POSE ESTIMATION USING RASTER2SEQ  
+Claude, you are implementing a new deep learning system from scratch.
+This document is the authoritative specification. Follow it literally.
+
+======================================================================
+1. TASK OVERVIEW
+======================================================================
+
+We are adapting the Raster2Seq autoregressive framework to the 
+Category-Agnostic Pose Estimation (CAPE) problem using the MP-100 dataset.
+
+At training time:
+    - The model learns from SEEN categories only.
+    - Each episode includes a support instance + a query instance.
+    - Both come from the same category.
+    - Each instance has labeled 2D keypoints.
+
+At test time:
+    We support TWO inference modes:
+
+(1) 1-SHOT FEW-SHOT INFERENCE  
+    Inputs:    support_coords (instance-specific), support_edges, query_image  
+    Output:    predicted query keypoints  
+    This matches POMNet-style CAPE.
+
+(2) ZERO-SHOT INFERENCE   
+    Inputs:    canonical_template (category-level), support_edges, query_image  
+    Output:    predicted query keypoints  
+    This mimics CapeX-style zero-shot but uses geometric priors instead of text.  
+    Templates will be provided; DO NOT compute them from test images in code.
+
+Both inference modes must be implemented cleanly and separately.
+
+======================================================================
+2. DATA MODEL (MP-100 ABSTRACTION)
+======================================================================
+
+We will provide the dataset in a normalized JSON format with the 
+following structure (Claude: assume this is the format):
+
+categories.json:
+[
+  {
+    "category_id": int,
+    "name": str,
+    "num_keypoints": int,
+    "skeleton": [[src_idx, dst_idx], ...]
+  },
+  ...
+]
+
+annotations.json:
+[
+  {
+    "image_id": int,
+    "file_name": "img_00123.jpg",
+    "category_id": int,
+    "bbox": [x, y, w, h],
+    "keypoints": [x1, y1, v1, x2, y2, v2, ...],  // v_i ∈ {0,1,2}
+    "instance_id": int                     // distinguish multiple instances
+  },
+  ...
+]
+
+Images live in:
+    images/<file_name>
+
+IMPORTANT:
+- Some images have multiple instances. Treat each instance independently.
+- Keypoints use COCO-style visibility flags:
+      v_i = 0 (not labeled), 1 or 2 (visible or occluded).
+- Only keypoints with v_i > 0 contribute to loss and evaluation.
+
+
+======================================================================
+3. EPISODIC TRAINING SETUP
+======================================================================
+
+Training uses episodic meta-learning:
+
+Episode = {
+   support_image,
+   support_coords,
+   support_edges,
+   query_image,
+   query_coords_gt
+}
+
+Procedure for each episode:
+1. Sample a category c from SEEN categories.
+2. Sample 1 support instance from category c.
+3. Sample 1 query instance from category c (different from support).
+4. Crop both support+query images by their bounding boxes.
+5. Resize both to 512×512.
+6. Normalize keypoints to [0,1]^2 by dividing by bbox size.
+
+SUPPORT INPUTS:
+    support_coords: tensor [N_c, 2] normalized
+    support_edges: list of edges from categories.json
+
+QUERY INPUT:
+    query_image: 512×512 RGB
+
+GROUND TRUTH:
+    query_coords_gt: [N_c, 2] normalized
+
+NOTE:
+- Categories have different numbers of keypoints N_c.
+- Batches will mix different categories; see padding below.
+
+
+======================================================================
+4. ZERO-SHOT + 1-SHOT SUPPORT REPRESENTATIONS
+======================================================================
+
+Claude must implement both:
+
+(1) INSTANCE-LEVEL SUPPORT COORDINATES (1-shot)
+------------------------------------------------
+Input during inference:
+    support_coords = from a real support instance
+    support_edges  = category-level skeleton
+
+This matches the training distribution.
+
+(2) CATEGORY-LEVEL CANONICAL TEMPLATE (0-shot)
+-----------------------------------------------
+Input during inference:
+    support_coords = canonical_template[c]
+    support_edges  = category-level skeleton
+
+Templates will be provided externally.  
+Claude MUST NOT compute templates inside the code 
+(to avoid test-set leakage).
+
+======================================================================
+5. BATCHING AND PADDING RULES
+======================================================================
+
+Because categories have variable numbers of keypoints, define:
+
+T_max = maximum num_keypoints across all categories.
+
+For each batch of size B:
+- Pad support_coords to shape [B, T_max, 2]
+- Pad query_coords_gt to [B, T_max, 2]
+- Pad visibility flags to [B, T_max]
+- Create keypoint_mask[b, t] = 1 if t < N_c for that category, else 0
+
+This mask MUST be used:
+- In attention (masked so padded support tokens aren't attended)
+- In the loss (exclude padded positions)
+
+======================================================================
+6. MODEL ARCHITECTURE
+======================================================================
+
+The model has 4 components:
+
+-----------------------------------------------------
+A. Query Image Encoder
+-----------------------------------------------------
+Use ResNet-50 pretrained on ImageNet.
+Work in PyTorch, no Lightning.
+
+Input: 512×512 RGB  
+Output: feature map F_q of shape [B, 2048, 16, 16]
+
+-----------------------------------------------------
+B. Support Pose Encoder (Transformer Encoder)
+-----------------------------------------------------
+Inputs:
+   support_coords: [B, T_max, 2]
+   keypoint_ids: learned embedding of size 256
+   edges: adjacency list
+
+Embed each coordinate (x,y) using:
+    - linear projection to dimension 256
+    - add a learned embedding for keypoint index i
+    - add a learned "edge encoding" based on graph neighbors
+
+Then pass through a 3-layer Transformer encoder
+(hidden size 256, 8 heads).
+
+Output: support_embeddings E_s: [B, T_max, 256]
+
+-----------------------------------------------------
+C. Autoregressive Transformer Decoder
+-----------------------------------------------------
+Exactly like Raster2Seq:
+
+- 6 layers  
+- hidden size 256  
+- 8 heads  
+- masked self-attention over generated tokens  
+- cross-attention over F_q (image)  
+- cross-attention over E_s (support)
+
+No causal violations allowed.
+
+-----------------------------------------------------
+D. Prediction Heads
+-----------------------------------------------------
+At each decoding step t:
+
+1. Classification head:
+     Predict next special token:
+         <coord>, <sep>, <eos>
+
+2. Regression head:
+     Predict continuous (x,y) in [0,1]^2 (via sigmoid)
+
+Teacher forcing is used during training.
+
+======================================================================
+7. SEQUENCE FORMAT
+======================================================================
+
+We follow a fixed predictable ordering for keypoints:
+
+Sequence:
+   <coord>, x_1, y_1, <sep>,
+   <coord>, x_2, y_2, <sep>,
+   ...
+   <coord>, x_Nc, y_Nc, <sep>,
+   <eos>
+
+Decoder input embeddings:
+- embed all tokens (special tokens + coords)
+
+======================================================================
+8. LOSS FUNCTIONS
+======================================================================
+
+Total loss per batch:
+
+L_total = CE_token_loss + λ * L1_coord_loss
+
+Where:
+
+- CE_token_loss: Cross-entropy over special tokens
+- L1_coord_loss: Mean absolute error over predicted coords,
+                 masked by:
+                    - keypoint_mask (to drop padded pts)
+                    - visibility_mask (only visible keypoints)
+
+Use λ = 5.0.
+
+Additionally:
+- Compute auxiliary losses at intermediate decoder layers.
+
+======================================================================
+9. TRAINING PROCEDURE
+======================================================================
+
+Use AdamW:
+    lr = 1e-4
+    weight_decay = 1e-4
+
+Batch size:
+    Use 2, 4, or 8 depending on memory.
+
+Number of epochs:
+    Full training = 300 epochs
+    Preliminary testing = 5 epochs
+
+Teacher forcing ON.
+
+Data augmentations:
+    random horizontal flip
+    color jitter
+    random crop (consistent for image+keypoints)
+
+Pseudocode structure:
+- load batch of episodes
+- run encoder, support encoder, decoder with teacher forcing
+- compute masked losses
+- backprop + optimizer step
+- log losses
+
+======================================================================
+10. INFERENCE PROCEDURE
+======================================================================
+
+Claude must implement TWO distinct inference functions:
+
+--------------------------------------------------
+A. infer_oneshot()
+--------------------------------------------------
+Inputs:
+    query_image
+    support_coords (instance-level)
+    support_edges
+
+Decoder runs autoregressively with NO teacher forcing.
+
+Output:
+    predicted keypoints [N_c, 2]
+
+--------------------------------------------------
+B. infer_zeroshot()
+--------------------------------------------------
+Inputs:
+    query_image
+    canonical_template[c]
+    support_edges
+
+Same decoding loop.
+
+Output:
+    predicted keypoints [N_c, 2]
+
+
+======================================================================
+11. EVALUATION (PCK@0.2)
+======================================================================
+
+Compute PCK per keypoint:
+
+correct_i = 1 if  ||pred_i - gt_i||_2  / bbox_size  < 0.2
+
+bbox_size = max(width, height) of the *query* instance.
+
+Visibility:
+- Only keypoints with visibility > 0 contribute.
+
+Aggregate:
+- per-image PCK
+- per-category PCK
+- mean PCK across categories
+
+DO NOT USE TEACHER FORCING IN EVAL.
+
+======================================================================
+12. SPLITS
+======================================================================
+
+The dataset contains 5 category-disjoint splits (MP-100 standard).
+We will provide a config listing category IDs per split.
+
+Claude must:
+- use SEEN categories for training
+- use VALID categories for hyperparameter tuning
+- use UNSEEN categories for testing (both 1-shot and 0-shot)
+
+Splits are controlled by an external config file:
+    configs/split_X.json
+
+======================================================================
+13. REPO STRUCTURE (Claude MUST output code in this layout)
+======================================================================
+
+project_root/
+    dataset.py
+    episodic_sampler.py
+    model/
+        __init__.py
+        encoders.py
+        decoder.py
+        heads.py
+        model.py
+    train.py
+    eval.py
+    utils/
+        geometry.py
+        masking.py
+        logging.py
+    configs/
+        default.yaml
+        split_0.json
+        split_1.json
+        ...
+    checkpoints/
+        (saved models)
+    logs/
+        (metrics)
+
+======================================================================
+14. IMPLEMENTATION RULES
+======================================================================
+
+YOU MUST:
+- Use pure PyTorch (no Lightning).
+- Write clean, modular, object-oriented code.
+- Avoid loading the entire dataset into memory at once.
+- Respect padding and masking rules.
+- Ensure no teacher forcing during inference.
+- Make all shapes explicit.
+- Write code that is runnable immediately.
+
+YOU MUST NOT:
+- Compute canonical templates from test annotations inside the code.
+- Use any test image to produce support coords.
+- Hardcode file paths.
+- Use external libraries except torchvision / PyTorch.
+
+======================================================================
+END OF SPEC.
+======================================================================
+
+

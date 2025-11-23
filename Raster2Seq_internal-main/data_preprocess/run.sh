@@ -1,1 +1,0 @@
-python rplan/generate_coco_rplan.py --data_root=/home/htp26/RoomFormer/data/rplan_json --output=coco_rplan_debug
