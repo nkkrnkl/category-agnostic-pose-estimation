@@ -19,9 +19,44 @@ try:
     from .label_smoothing_loss import label_smoothed_nll_loss
 except ImportError:
     # Provide a simple fallback
-    def label_smoothed_nll_loss(lprobs, target, epsilon, ignore_index=-100):
-        # Simple cross-entropy without label smoothing
-        return F.nll_loss(lprobs, target, ignore_index=ignore_index, reduction='mean')
+    def label_smoothed_nll_loss(logits, target, epsilon=0.0, ignore_index=-100):
+        """
+        Compute cross-entropy loss with optional label smoothing.
+        
+        Args:
+            logits: Raw logits (N, num_classes) where N is the number of valid tokens
+            target: Target class indices (N,) - already masked (no -1 values)
+            epsilon: Label smoothing factor (0 = no smoothing)
+            ignore_index: Index to ignore in loss computation (usually not needed since mask is already applied)
+        """
+        # Ensure logits are 2D: (N, num_classes)
+        if logits.dim() == 1:
+            # If 1D, we need to reshape - but this shouldn't happen
+            raise ValueError(f"logits should be 2D, got shape {logits.shape}")
+        
+        # Ensure target is 1D: (N,)
+        if target.dim() > 1:
+            target = target.view(-1)
+        if logits.size(0) != target.size(0):
+            raise ValueError(f"logits and target batch size mismatch: {logits.size(0)} vs {target.size(0)}")
+        
+        if epsilon > 0:
+            # Label smoothing: convert to log-probabilities and compute smoothed loss
+            log_probs = F.log_softmax(logits, dim=-1)
+            n_classes = logits.size(-1)
+            
+            # Create smoothed target distribution
+            target_one_hot = torch.zeros_like(log_probs)
+            target_one_hot.scatter_(1, target.unsqueeze(1), 1.0)
+            target_one_hot = target_one_hot * (1 - epsilon) + epsilon / n_classes
+            
+            # Compute KL divergence (equivalent to cross-entropy with smoothing)
+            loss = -(target_one_hot * log_probs).sum(dim=-1)
+            return loss.mean()
+        else:
+            # No smoothing: use standard cross-entropy (handles logits directly)
+            # Since mask is already applied, we don't need ignore_index
+            return F.cross_entropy(logits, target, reduction='mean')
 
 # from .deformable_transformer import build_deforamble_transformer
 from .deformable_transformer_v2 import build_deforamble_transformer
