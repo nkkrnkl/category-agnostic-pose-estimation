@@ -21,7 +21,7 @@ import matplotlib.patches as patches
 
 from models.roomformer_v2 import build as build_base_model
 from models.cape_model import build_cape_model
-from datasets.mp100_cape import build_mp100_cape, ImageNotFoundError
+from datasets.mp100_cape import build_mp100_cape
 from datasets.token_types import TokenType
 from datasets.discrete_tokenizer import DiscreteTokenizer
 
@@ -88,30 +88,33 @@ def decode_sequence_to_keypoints(pred_tokens, pred_coords, tokenizer):
     return keypoints
 
 
-def visualize_pose_prediction(image, pred_keypoints, support_keypoints,
+def visualize_pose_prediction(support_image, query_image, pred_keypoints, support_keypoints,
                               skeleton_edges=None, save_path=None,
                               category_name="Unknown"):
     """
     Visualize predicted pose overlaid on image.
 
     Args:
-        image: PIL Image or numpy array (H, W, 3)
+        support_image: PIL Image or numpy array (H, W, 3) - Support bird image
+        query_image: PIL Image or numpy array (H, W, 3) - Query bird image (DIFFERENT from support)
         pred_keypoints: List of (x, y) predicted keypoint coordinates
         support_keypoints: List of (x, y) support keypoint coordinates (template)
         skeleton_edges: List of [src, dst] edge pairs (0-indexed)
         save_path: Path to save visualization
         category_name: Category name for title
     """
-    if isinstance(image, Image.Image):
-        image = np.array(image)
+    if isinstance(support_image, Image.Image):
+        support_image = np.array(support_image)
+    if isinstance(query_image, Image.Image):
+        query_image = np.array(query_image)
 
     # Create figure with two subplots
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 8))
 
-    h, w = image.shape[:2]
+    h, w = query_image.shape[:2]
 
-    # Left: Support pose (template)
-    ax1.imshow(image)
+    # Left: Support image with support pose (template from DIFFERENT bird)
+    ax1.imshow(support_image)
     ax1.set_title(f"Support Pose Template\n{category_name}", fontsize=14, fontweight='bold')
     ax1.axis('off')
 
@@ -146,8 +149,8 @@ def visualize_pose_prediction(image, pred_keypoints, support_keypoints,
 
     ax1.legend(loc='upper right')
 
-    # Right: Query image with predicted pose
-    ax2.imshow(image)
+    # Right: Query image with predicted pose (DIFFERENT bird from same category)
+    ax2.imshow(query_image)
     ax2.set_title(f"Predicted Pose\n{len(pred_keypoints)} keypoints", fontsize=14, fontweight='bold')
     ax2.axis('off')
 
@@ -244,19 +247,11 @@ def visualize_from_checkpoint(args):
     # Sample and visualize
     category_samples = defaultdict(list)
 
-    # Group samples by category (skip missing images)
-    skipped_count = 0
+    # Group samples by category
     for idx in range(len(dataset)):
-        try:
-            data = dataset[idx]
-            cat_id = data['category_id']
-            category_samples[cat_id].append(idx)
-        except ImageNotFoundError:
-            skipped_count += 1
-            continue
-    
-    if skipped_count > 0:
-        print(f"Note: Skipped {skipped_count} missing images during dataset iteration")
+        data = dataset[idx]
+        cat_id = data['category_id']
+        category_samples[cat_id].append(idx)
 
     # Visualize samples
     total_visualized = 0
@@ -267,28 +262,11 @@ def visualize_from_checkpoint(args):
 
         # Take up to num_samples per category
         for sample_idx in sample_indices[:args.num_samples]:
-            try:
-                data = dataset[sample_idx]
-            except ImageNotFoundError:
-                print(f"  Skipping sample {sample_idx} (image not found)")
-                continue
+            data = dataset[sample_idx]
 
             # Get support data (first example in category)
-            try:
-                support_idx = sample_indices[0]
-                support_data = dataset[support_idx]
-            except ImageNotFoundError:
-                # Try to find a valid support example
-                support_data = None
-                for alt_support_idx in sample_indices:
-                    try:
-                        support_data = dataset[alt_support_idx]
-                        break
-                    except ImageNotFoundError:
-                        continue
-                if support_data is None:
-                    print(f"  Skipping category {cat_name} (no valid support image)")
-                    continue
+            support_idx = sample_indices[0]
+            support_data = dataset[support_idx]
 
             # Prepare inputs
             image = data['image']
@@ -321,16 +299,24 @@ def visualize_from_checkpoint(args):
             tokenizer = dataset.tokenizer
             pred_keypoints = decode_sequence_to_keypoints(pred_tokens, pred_coords, tokenizer)
 
-            # Visualize
-            if isinstance(data['image'], torch.Tensor):
-                vis_image = data['image'].permute(1, 2, 0).numpy()
-                vis_image = (vis_image * 255).astype(np.uint8)
+            # Prepare support image (bird_A - template)
+            if isinstance(support_data['image'], torch.Tensor):
+                support_vis_image = support_data['image'].permute(1, 2, 0).numpy()
+                support_vis_image = (support_vis_image * 255).astype(np.uint8)
             else:
-                vis_image = data['image']
+                support_vis_image = support_data['image']
+
+            # Prepare query image (bird_B - DIFFERENT bird from same category)
+            if isinstance(data['image'], torch.Tensor):
+                query_vis_image = data['image'].permute(1, 2, 0).numpy()
+                query_vis_image = (query_vis_image * 255).astype(np.uint8)
+            else:
+                query_vis_image = data['image']
 
             save_path = output_dir / f"{cat_name}_sample_{sample_idx}.png"
             visualize_pose_prediction(
-                image=vis_image,
+                support_image=support_vis_image,
+                query_image=query_vis_image,
                 pred_keypoints=pred_keypoints,
                 support_keypoints=support_coords,
                 skeleton_edges=skeleton_edges,
