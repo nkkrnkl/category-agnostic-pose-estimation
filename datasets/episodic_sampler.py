@@ -16,6 +16,7 @@ import random
 import json
 from pathlib import Path
 from collections import defaultdict
+from datasets.mp100_cape import ImageNotFoundError
 
 
 class EpisodicSampler:
@@ -165,6 +166,7 @@ class EpisodicDataset(data.Dataset):
     def __getitem__(self, idx):
         """
         Sample and return one episode.
+        Retries with different episodes if images are missing.
 
         Returns:
             episode_data: dict containing:
@@ -175,53 +177,65 @@ class EpisodicDataset(data.Dataset):
                 - query_targets: List of query keypoint targets (seq_data)
                 - category_id: Category ID
         """
-        # Sample episode
-        episode = self.sampler.sample_episode()
+        max_retries = 10  # Maximum number of retries to find a valid episode
+        
+        for retry in range(max_retries):
+            try:
+                # Sample episode
+                episode = self.sampler.sample_episode()
 
-        # Load support image
-        support_data = self.base_dataset[episode['support_idx']]
+                # Load support image
+                support_data = self.base_dataset[episode['support_idx']]
 
-        # Extract support pose graph (normalized coordinates)
-        support_coords = torch.tensor(support_data['keypoints'], dtype=torch.float32)
+                # Extract support pose graph (normalized coordinates)
+                support_coords = torch.tensor(support_data['keypoints'], dtype=torch.float32)
 
-        # Normalize support coordinates to [0, 1]
-        h, w = support_data['height'], support_data['width']
-        support_coords[:, 0] /= w  # x
-        support_coords[:, 1] /= h  # y
+                # Normalize support coordinates to [0, 1]
+                h, w = support_data['height'], support_data['width']
+                support_coords[:, 0] /= w  # x
+                support_coords[:, 1] /= h  # y
 
-        # Create support mask (all valid for now)
-        support_mask = torch.ones(len(support_coords), dtype=torch.bool)
+                # Create support mask (all valid for now)
+                support_mask = torch.ones(len(support_coords), dtype=torch.bool)
 
-        # Extract skeleton edges for support pose graph
-        support_skeleton = support_data.get('skeleton', [])
+                # Extract skeleton edges for support pose graph
+                support_skeleton = support_data.get('skeleton', [])
 
-        # Load query images
-        query_images = []
-        query_targets = []
-        query_metadata = []
+                # Load query images
+                query_images = []
+                query_targets = []
+                query_metadata = []
 
-        for query_idx in episode['query_indices']:
-            query_data = self.base_dataset[query_idx]
-            query_images.append(query_data['image'])
-            query_targets.append(query_data['seq_data'])
-            query_metadata.append({
-                'image_id': query_data['image_id'],
-                'height': query_data['height'],
-                'width': query_data['width'],
-                'keypoints': query_data['keypoints'],
-                'num_keypoints': query_data['num_keypoints']
-            })
+                for query_idx in episode['query_indices']:
+                    query_data = self.base_dataset[query_idx]
+                    query_images.append(query_data['image'])
+                    query_targets.append(query_data['seq_data'])
+                    query_metadata.append({
+                        'image_id': query_data['image_id'],
+                        'height': query_data['height'],
+                        'width': query_data['width'],
+                        'keypoints': query_data['keypoints'],
+                        'num_keypoints': query_data['num_keypoints']
+                    })
 
-        return {
-            'support_image': support_data['image'],
-            'support_coords': support_coords,
-            'support_mask': support_mask,
-            'support_skeleton': support_skeleton,
-            'query_images': query_images,
-            'query_targets': query_targets,
-            'query_metadata': query_metadata,
-            'category_id': episode['category_id']
-        }
+                return {
+                    'support_image': support_data['image'],
+                    'support_coords': support_coords,
+                    'support_mask': support_mask,
+                    'support_skeleton': support_skeleton,
+                    'query_images': query_images,
+                    'query_targets': query_targets,
+                    'query_metadata': query_metadata,
+                    'category_id': episode['category_id']
+                }
+            except ImageNotFoundError as e:
+                # If image is missing, retry with a different episode
+                if retry < max_retries - 1:
+                    continue  # Try again with a different episode
+                else:
+                    # If we've exhausted retries, raise the error
+                    raise RuntimeError(f"Failed to find valid episode after {max_retries} retries. "
+                                     f"Last error: {e}")
 
 
 def episodic_collate_fn(batch):

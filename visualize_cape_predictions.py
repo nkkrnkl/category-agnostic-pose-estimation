@@ -21,7 +21,7 @@ import matplotlib.patches as patches
 
 from models.roomformer_v2 import build as build_base_model
 from models.cape_model import build_cape_model
-from datasets.mp100_cape import build_mp100_cape
+from datasets.mp100_cape import build_mp100_cape, ImageNotFoundError
 from datasets.token_types import TokenType
 from datasets.discrete_tokenizer import DiscreteTokenizer
 
@@ -244,11 +244,19 @@ def visualize_from_checkpoint(args):
     # Sample and visualize
     category_samples = defaultdict(list)
 
-    # Group samples by category
+    # Group samples by category (skip missing images)
+    skipped_count = 0
     for idx in range(len(dataset)):
-        data = dataset[idx]
-        cat_id = data['category_id']
-        category_samples[cat_id].append(idx)
+        try:
+            data = dataset[idx]
+            cat_id = data['category_id']
+            category_samples[cat_id].append(idx)
+        except ImageNotFoundError:
+            skipped_count += 1
+            continue
+    
+    if skipped_count > 0:
+        print(f"Note: Skipped {skipped_count} missing images during dataset iteration")
 
     # Visualize samples
     total_visualized = 0
@@ -259,11 +267,28 @@ def visualize_from_checkpoint(args):
 
         # Take up to num_samples per category
         for sample_idx in sample_indices[:args.num_samples]:
-            data = dataset[sample_idx]
+            try:
+                data = dataset[sample_idx]
+            except ImageNotFoundError:
+                print(f"  Skipping sample {sample_idx} (image not found)")
+                continue
 
             # Get support data (first example in category)
-            support_idx = sample_indices[0]
-            support_data = dataset[support_idx]
+            try:
+                support_idx = sample_indices[0]
+                support_data = dataset[support_idx]
+            except ImageNotFoundError:
+                # Try to find a valid support example
+                support_data = None
+                for alt_support_idx in sample_indices:
+                    try:
+                        support_data = dataset[alt_support_idx]
+                        break
+                    except ImageNotFoundError:
+                        continue
+                if support_data is None:
+                    print(f"  Skipping category {cat_name} (no valid support image)")
+                    continue
 
             # Prepare inputs
             image = data['image']

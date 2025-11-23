@@ -10,7 +10,7 @@ import torch
 # Add theodoros to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from datasets.mp100_cape import build_mp100_cape
+from datasets.mp100_cape import build_mp100_cape, ImageNotFoundError
 import argparse
 
 
@@ -40,10 +40,19 @@ def test_dataset_loading():
         dataset_train = build_mp100_cape('train', args)
         print(f"✓ Train dataset loaded: {len(dataset_train)} samples")
 
-        # Test loading a single sample
+        # Test loading a single sample (skip missing images)
         print("\nTesting single sample loading...")
-        sample = dataset_train[0]
-        print(f"✓ Sample loaded successfully")
+        sample = None
+        for idx in range(min(10, len(dataset_train))):  # Try up to 10 samples
+            try:
+                sample = dataset_train[idx]
+                print(f"✓ Sample loaded successfully (tried {idx+1} samples)")
+                break
+            except ImageNotFoundError:
+                continue
+        if sample is None:
+            print("✗ Could not load any sample (all images missing)")
+            return False
         print(f"  - Image shape: {sample['image'].shape}")
         print(f"  - Num keypoints: {sample.get('num_keypoints', 'N/A')}")
         print(f"  - Category ID: {sample.get('category_id', 'N/A')}")
@@ -70,10 +79,19 @@ def test_dataset_loading():
         dataset_val = build_mp100_cape('val', args)
         print(f"✓ Val dataset loaded: {len(dataset_val)} samples")
 
-        # Test loading a single sample
+        # Test loading a single sample (skip missing images)
         print("\nTesting single sample loading...")
-        sample = dataset_val[0]
-        print(f"✓ Sample loaded successfully")
+        sample = None
+        for idx in range(min(10, len(dataset_val))):  # Try up to 10 samples
+            try:
+                sample = dataset_val[idx]
+                print(f"✓ Sample loaded successfully (tried {idx+1} samples)")
+                break
+            except ImageNotFoundError:
+                continue
+        if sample is None:
+            print("✗ Could not load any sample (all images missing)")
+            return False
         print(f"  - Image shape: {sample['image'].shape}")
         print(f"  - Num keypoints: {sample.get('num_keypoints', 'N/A')}")
 

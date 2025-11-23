@@ -13,6 +13,11 @@ import os
 from copy import deepcopy
 import torchvision
 
+
+class ImageNotFoundError(Exception):
+    """Raised when an image file is not found in the dataset."""
+    pass
+
 from .token_types import TokenType
 
 # Import transforms (with fallback if needed)
@@ -165,6 +170,11 @@ class MP100CAPE(torch.utils.data.Dataset):
         img_info = coco.loadImgs(img_id)[0]
         path = img_info['file_name']
         file_name = os.path.join(self.root, path)
+
+        # Check if image file exists (skip if not in GS bucket)
+        # This check happens during training/testing, not at initialization
+        if not os.path.exists(file_name):
+            raise ImageNotFoundError(f"Image not found: {file_name}")
 
         img = np.array(Image.open(file_name).convert('RGB'))
 
