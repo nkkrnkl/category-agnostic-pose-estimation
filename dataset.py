@@ -112,50 +112,17 @@ class MP100Dataset(Dataset):
         img_info = self.images[ann['image_id']]
         img_path = os.path.join(self.image_root, img_info['file_name'])
         
-        # Check if file exists - if not, try to find a valid alternative
+        # Check if file exists - if not, skip it (raise error to be caught by dataloader)
         if not os.path.exists(img_path):
             # Mark this file as missing
             self._missing_files.add(ann['image_id'])
             
-            # Try to find another valid item from the same category
-            cat_id = ann['category_id']
-            category_instances = self.category_to_instances.get(cat_id, [])
-            
-            # Try up to 10 random instances from the same category
-            max_retries = min(10, len(category_instances))
-            for _ in range(max_retries):
-                alt_ann = random.choice(category_instances)
-                alt_img_info = self.images[alt_ann['image_id']]
-                alt_img_path = os.path.join(self.image_root, alt_img_info['file_name'])
-                
-                if os.path.exists(alt_img_path):
-                    # Use this alternative annotation
-                    ann = alt_ann
-                    img_info = alt_img_info
-                    img_path = alt_img_path
-                    break
-            else:
-                # If no valid alternative found, try any random annotation
-                # This is a fallback to avoid raising an error
-                max_fallback_retries = 100
-                for _ in range(max_fallback_retries):
-                    fallback_idx = random.randint(0, len(self.annotations) - 1)
-                    fallback_ann = self.annotations[fallback_idx]
-                    fallback_img_info = self.images[fallback_ann['image_id']]
-                    fallback_img_path = os.path.join(self.image_root, fallback_img_info['file_name'])
-                    
-                    if os.path.exists(fallback_img_path):
-                        ann = fallback_ann
-                        img_info = fallback_img_info
-                        img_path = fallback_img_path
-                        break
-                else:
-                    # Last resort: raise an error if we can't find any valid file
-                    raise FileNotFoundError(
-                        f"Could not find valid image file. Tried {max_retries} from category "
-                        f"{cat_id} and {max_fallback_retries} random files. "
-                        f"Original missing file: {img_path}"
-                    )
+            # Raise error to skip this item - the episodic sampler will catch and skip the episode
+            raise FileNotFoundError(
+                f"Image file not found: {img_path}. "
+                f"Annotation ID: {ann['id']}, Image ID: {ann['image_id']}, Category: {ann['category_id']}. "
+                f"This episode will be skipped during training."
+            )
         
         image = Image.open(img_path).convert('RGB')
 
