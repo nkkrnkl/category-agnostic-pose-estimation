@@ -65,6 +65,9 @@ paths:
 device: 'cuda'  # 'cuda' or 'cpu'
 num_workers: 4
 
+# Performance optimizations
+compile_model: true  # Set to false to disable torch.compile if it's not helping
+
 # Experiment tracking
 experiment:
   name: 'raster2seq_cape_split1'

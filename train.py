@@ -64,10 +64,20 @@ def create_model(config, device):
     model = model.to(device)
     
     # Compile model for faster training (PyTorch 2.0+)
-    if hasattr(torch, 'compile') and device.type == 'cuda':
+    # Can be disabled via config if compilation is causing issues
+    should_compile = config.get('compile_model', True)
+    if hasattr(torch, 'compile') and device.type == 'cuda' and should_compile:
         print("Compiling model with torch.compile for faster training...")
-        model = torch.compile(model, mode='reduce-overhead')
-        print("✓ Model compiled successfully")
+        # Configure torch.compile to capture scalar outputs (reduces graph break warnings)
+        if hasattr(torch, '_dynamo'):
+            torch._dynamo.config.capture_scalar_outputs = True
+        # Use 'default' mode for good balance of compilation speed and runtime performance
+        model = torch.compile(model, mode='default')
+        print("✓ Model compiled successfully (first epoch will be slower due to compilation)")
+    elif should_compile and device.type == 'cuda':
+        print("⚠ torch.compile not available (requires PyTorch 2.0+)")
+    elif not should_compile:
+        print("⚠ Model compilation disabled in config")
 
     return model
 
