@@ -7,7 +7,7 @@ from utils.masking import create_keypoint_mask
 
 print("Loading dataset...")
 train_dataset = MP100Dataset(
-    annotation_file='cleaned_annotations/mp100_split1_train.json',
+    annotation_file='data/cleaned_annotations/mp100_split1_train.json',
     image_root='data',
     image_size=512,
     augment=True

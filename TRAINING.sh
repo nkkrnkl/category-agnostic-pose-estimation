@@ -66,8 +66,8 @@ if [ ! -f "$CONFIG_FILE" ]; then
     exit 1
 fi
 
-if [ ! -d "cleaned_annotations" ]; then
-    echo "❌ Error: cleaned_annotations/ directory not found!"
+if [ ! -d "data/cleaned_annotations" ]; then
+    echo "❌ Error: data/cleaned_annotations/ directory not found!"
     echo "   Please ensure MP-100 cleaned annotations are in place."
     exit 1
 fi
@@ -81,15 +81,15 @@ fi
 # Check for annotation files (at least one split)
 ANNOTATION_FOUND=0
 for split in 1 2 3 4 5; do
-    if [ -f "cleaned_annotations/mp100_split${split}_train.json" ]; then
+    if [ -f "data/cleaned_annotations/mp100_split${split}_train.json" ]; then
         ANNOTATION_FOUND=1
         break
     fi
 done
 
 if [ $ANNOTATION_FOUND -eq 0 ]; then
-    echo "❌ Error: No MP-100 annotation files found in cleaned_annotations/ directory!"
-    echo "   Expected files like: cleaned_annotations/mp100_split1_train.json"
+    echo "❌ Error: No MP-100 annotation files found in data/cleaned_annotations/ directory!"
+    echo "   Expected files like: data/cleaned_annotations/mp100_split1_train.json"
     exit 1
 fi
 

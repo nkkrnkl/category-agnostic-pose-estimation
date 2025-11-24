@@ -3,9 +3,9 @@
 # Data paths
 data:
   image_root: 'data'
-  annotation_train: 'cleaned_annotations/mp100_split1_train.json'
-  annotation_val: 'cleaned_annotations/mp100_split1_val.json'
-  annotation_test: 'cleaned_annotations/mp100_split1_test.json'
+  annotation_train: 'data/cleaned_annotations/mp100_split1_train.json'
+  annotation_val: 'data/cleaned_annotations/mp100_split1_val.json'
+  annotation_test: 'data/cleaned_annotations/mp100_split1_test.json'
   image_size: 512
 
 # Model architecture
