@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 import yaml
 
 from dataset import MP100Dataset
@@ -125,7 +125,7 @@ def train_epoch(model, dataloader, optimizer, device, config, logger, epoch, sca
         optimizer.zero_grad()
         
         if use_amp:
-            with autocast():
+            with autocast(device_type='cuda'):
                 outputs = model(
                     query_images=query_images,
                     support_coords=support_coords,
@@ -266,7 +266,7 @@ def main():
     # Create GradScaler for mixed precision training (CUDA only)
     scaler = None
     if device.type == 'cuda':
-        scaler = GradScaler()
+        scaler = GradScaler('cuda')
         print("✓ Mixed precision training enabled (FP16)")
 
     # Logger
