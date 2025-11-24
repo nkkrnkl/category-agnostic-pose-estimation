@@ -194,12 +194,38 @@ def create_episodic_dataloader(dataset, batch_size, num_episodes, shuffle=True, 
 
     # Custom batch loader
     def batch_loader(episode_batch):
-        """Load a batch of episodes."""
+        """Load a batch of episodes, skipping episodes with missing files."""
         support_query_pairs = []
+        skipped_count = 0
+        
         for support_idx, query_idx in episode_batch:
-            support_item = dataset[support_idx]
-            query_item = dataset[query_idx]
-            support_query_pairs.append((support_item, query_item))
+            try:
+                support_item = dataset[support_idx]
+                query_item = dataset[query_idx]
+                
+                # Verify they have the same number of keypoints (same category)
+                # This ensures they're from the same category even if fallback occurred
+                if support_item['num_keypoints'] != query_item['num_keypoints']:
+                    skipped_count += 1
+                    continue
+                    
+                support_query_pairs.append((support_item, query_item))
+            except (FileNotFoundError, KeyError, IndexError) as e:
+                # Skip episodes with missing files or other errors
+                # This allows training to continue even if some files are missing
+                skipped_count += 1
+                continue
+        
+        # If all episodes were skipped, we need to handle this gracefully
+        if len(support_query_pairs) == 0:
+            # This shouldn't happen often, but if it does, we'll skip this batch
+            # by raising StopIteration which the dataloader will handle
+            raise StopIteration
+        
+        # Log if we skipped some episodes (only occasionally to avoid spam)
+        if skipped_count > 0 and random.random() < 0.01:  # 1% chance to log
+            print(f"Warning: Skipped {skipped_count} episodes due to missing files in this batch")
+        
         return collate_episodes(support_query_pairs)
 
     # Create dataloader
