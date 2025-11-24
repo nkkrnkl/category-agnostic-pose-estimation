@@ -102,27 +102,38 @@ class CAPEModel(nn.Module):
 
     def forward(self, samples, support_coords, support_mask, targets=None, skeleton_edges=None):
         """
-        Forward pass with support pose graph conditioning.
+        Forward pass with support pose graph conditioning for 1-shot CAPE.
+
+        IMPORTANT: For correct 1-shot episodic learning, the support and query
+        batch dimensions MUST match. After the episodic_collate_fn fix, each
+        support is repeated K times (once per query in that episode), ensuring:
+            support[i] corresponds to query[i]
 
         Args:
             samples: Query images
                 - If NestedTensor: contains tensors and mask
                 - If list of tensors: batch of images
-                - If single tensor: (B, C, H, W)
+                - If single tensor: (B, C, H, W) where B = batch_size (total queries)
 
             support_coords: Support pose graph coordinates
-                - Shape: (B, N_support, 2) where N_support = num keypoints in support
-                - Coordinates normalized to [0, 1]
+                - Shape: (B, N_support, 2) where:
+                    - B = batch_size (same as query batch size!)
+                    - N_support = num keypoints in support (varies by category)
+                    - Coordinates normalized to [0, 1]
+                - NOTE: B includes all queries from all episodes in the batch.
+                  Each support is repeated for its corresponding queries.
 
             support_mask: Mask for valid support keypoints
                 - Shape: (B, N_support)
-                - True = valid, False = padding
+                - True = valid keypoint, False = padding
+                - Same batch size as support_coords and samples
 
             targets: Ground truth targets (seq_data) for training
                 - dict with keys like 'seq11', 'seq21', 'target_seq', etc.
+                - Each tensor has shape (B, seq_len, ...)
 
             skeleton_edges: Optional skeleton edge information
-                - List of edge lists, one per batch item
+                - List of edge lists, one per batch item (length = B)
                 - Each edge list: [[src1, dst1], [src2, dst2], ...]
 
         Returns:
@@ -131,9 +142,56 @@ class CAPEModel(nn.Module):
                 - 'pred_coords': Predicted coordinates (B, seq_len, 2)
                 - 'aux_outputs': Auxiliary outputs from intermediate layers
         """
+        # ========================================================================
+        # CRITICAL FIX: Verify support-query batch alignment for 1-shot learning
+        # ========================================================================
+        # For 1-shot CAPE, each query must use exactly ONE support (from its episode).
+        # The episodic_collate_fn repeats each support K times to ensure:
+        #   - support_coords[i] is the support for query[i]
+        #   - cross-attention in decoder will correctly pair them
+        #
+        # If batch sizes don't match, queries could attend to wrong supports!
+        # ========================================================================
+        
+        # Extract batch size from query images
+        if isinstance(samples, torch.Tensor):
+            query_batch_size = samples.shape[0]
+        elif hasattr(samples, 'tensors'):  # NestedTensor
+            query_batch_size = samples.tensors.shape[0]
+        else:
+            query_batch_size = len(samples)
+        
+        # Verify support batch size matches query batch size
+        support_batch_size = support_coords.shape[0]
+        
+        if support_batch_size != query_batch_size:
+            raise ValueError(
+                f"Support-Query batch size mismatch! This breaks 1-shot episodic structure.\n"
+                f"  Support batch size: {support_batch_size}\n"
+                f"  Query batch size: {query_batch_size}\n"
+                f"Expected: Both should be (B*K) where B=episodes, K=queries_per_episode.\n"
+                f"Check: episodic_collate_fn should repeat each support K times."
+            )
+        
+        # Also verify support_mask matches
+        if support_mask.shape[0] != support_batch_size:
+            raise ValueError(
+                f"Support mask batch size ({support_mask.shape[0]}) doesn't match "
+                f"support_coords batch size ({support_batch_size})"
+            )
+        
+        # Verify skeleton_edges list length if provided
+        if skeleton_edges is not None and len(skeleton_edges) != support_batch_size:
+            raise ValueError(
+                f"Skeleton edges list length ({len(skeleton_edges)}) doesn't match "
+                f"batch size ({support_batch_size})"
+            )
+
         # 1. Encode support pose graph (with skeleton edges)
-        # support_coords: (B, N_support, 2)
-        # support_features: (B, N_support, D)
+        # After verification, we know:
+        #   support_coords: (B, N_support, 2)
+        #   support_features will be: (B, N_support, D)
+        # where B = total number of queries (each with its own support)
         support_features = self.support_encoder(support_coords, support_mask, skeleton_edges)
 
         # Global support representation (optional)
@@ -169,72 +227,147 @@ class CAPEModel(nn.Module):
 
         return outputs
 
-    def forward_inference(self, samples, support_coords, support_mask, max_seq_len=None):
+    def forward_inference(self, samples, support_coords, support_mask, skeleton_edges=None, max_seq_len=None, use_cache=True):
         """
         Inference mode: Generate keypoint sequence autoregressively.
 
+        This method performs TRUE autoregressive generation:
+        1. Start with BOS (beginning of sequence) token
+        2. Generate one token at a time
+        3. Feed each prediction back as input for the next token
+        4. Stop at EOS (end of sequence) or max length
+
+        This is different from training (teacher forcing), where the model
+        sees the entire ground truth sequence at once.
+
         Args:
-            samples: Query image
-            support_coords: Support pose graph (B, N, 2)
-            support_mask: Support mask (B, N)
-            max_seq_len: Maximum sequence length to generate
+            samples: Query image tensor or NestedTensor
+                - Shape: (B, C, H, W) or list of images
+            support_coords: Support pose graph coordinates (B, N, 2)
+                - Normalized to [0, 1]
+            support_mask: Support keypoint mask (B, N)
+                - True = valid keypoint, False = padding
+            skeleton_edges: Optional skeleton edge information
+                - List of edge lists, one per batch item
+                - Each edge list: [[src1, dst1], [src2, dst2], ...]
+                - If None, only coordinate information is used
+            max_seq_len: Maximum sequence length to generate (default: uses base model's default)
+            use_cache: Whether to use KV caching for faster generation (default: True)
 
         Returns:
             predictions: dict with:
-                - 'sequences': Generated token sequences
-                - 'coordinates': Decoded keypoint coordinates
+                - 'sequences': Generated token sequences (B, seq_len)
+                - 'coordinates': Decoded keypoint coordinates (B, num_keypoints, 2)
+                - 'logits': Token prediction logits (B, seq_len, vocab_size)
         """
-        # Encode support
-        support_features = self.support_encoder(support_coords, support_mask)
+        # ========================================================================
+        # CRITICAL FIX: Use true autoregressive generation
+        # ========================================================================
+        # The base model has a proper forward_inference() method that generates
+        # sequences autoregressively (token-by-token, feeding predictions back).
+        #
+        # OLD (INCORRECT) APPROACH:
+        #   - Create dummy zeros for all sequence positions
+        #   - Call forward() once with all zeros
+        #   - Take argmax → this is NOT autoregressive!
+        #
+        # NEW (CORRECT) APPROACH:
+        #   - Call base_model.forward_inference()
+        #   - It generates: BOS → token_1 → token_2 → ... → EOS
+        #   - Each token conditions on all previous tokens
+        # ========================================================================
 
-        # Inject into decoder
-        self.base_model.transformer.decoder.support_features = support_features
-        self.base_model.transformer.decoder.support_mask = support_mask
-        self.base_model.transformer.decoder.support_cross_attn_layers = getattr(
-            self, 'support_cross_attention_layers', None
-        )
-        self.base_model.transformer.decoder.support_attn_norms = getattr(
-            self, 'support_attn_layer_norms', None
-        )
+        # ================================================================
+        # CRITICAL FIX: Pass skeleton_edges to utilize structural information
+        # ================================================================
+        # Skeleton edges define connectivity between keypoints (e.g., shoulder→elbow).
+        # The support encoder uses these to create adjacency-aware embeddings.
+        # Previously missing in forward_inference, now included.
+        #
+        # The support encoder will:
+        #   - Build adjacency matrix from skeleton edges
+        #   - Create edge embeddings based on connectivity
+        #   - Combine with coordinate embeddings for richer representations
+        #
+        # If skeleton_edges is None, falls back to coordinate-only encoding.
+        # ================================================================
+        
+        # 1. Encode support pose graph with skeleton structure
+        support_features = self.support_encoder(support_coords, support_mask, skeleton_edges)
+        # support_features: (B, N_support, hidden_dim)
 
-        # Generate sequence
-        # Note: This would need to be implemented in the base model's decoder
-        # For now, we'll use the forward pass and take argmax
-        # Create dummy seq_kwargs for inference (model expects these but we don't use them)
-        B = samples.shape[0] if isinstance(samples, torch.Tensor) else len(samples)
-        device = support_coords.device
-        seq_len = 200  # Default sequence length
+        # 2. Check if base model supports CAPE mode (with built-in support handling)
+        if hasattr(self.base_model, 'cape_mode') and self.base_model.cape_mode:
+            # Base model can handle support graphs directly
+            # Pass support_coords directly; the base model will encode them internally
+            with torch.no_grad():
+                outputs = self.base_model.forward_inference(
+                    samples=samples,
+                    use_cache=use_cache,
+                    support_graphs=support_coords,
+                    support_mask=support_mask
+                )
+        else:
+            # Base model doesn't have CAPE mode - inject support via decoder attributes
+            # This is a fallback for older base model versions
+            
+            # Inject support features into decoder so it can cross-attend during generation
+            self.base_model.transformer.decoder.support_features = support_features
+            self.base_model.transformer.decoder.support_mask = support_mask
+            self.base_model.transformer.decoder.support_cross_attn_layers = getattr(
+                self, 'support_cross_attention_layers', None
+            )
+            self.base_model.transformer.decoder.support_attn_norms = getattr(
+                self, 'support_attn_layer_norms', None
+            )
 
-        dummy_seq_kwargs = {
-            'seq11': torch.zeros((B, seq_len), dtype=torch.long, device=device),
-            'seq12': torch.zeros((B, seq_len), dtype=torch.long, device=device),
-            'seq21': torch.zeros((B, seq_len), dtype=torch.long, device=device),  # Token indices, not coords
-            'seq22': torch.zeros((B, seq_len), dtype=torch.long, device=device),  # Token indices, not coords
-            'target_seq': torch.zeros((B, seq_len), dtype=torch.long, device=device),
-            'delta_x1': torch.zeros((B, seq_len), dtype=torch.long, device=device),
-            'delta_x2': torch.zeros((B, seq_len), dtype=torch.long, device=device),
-            'delta_y1': torch.zeros((B, seq_len), dtype=torch.long, device=device),
-            'delta_y2': torch.zeros((B, seq_len), dtype=torch.long, device=device),
-        }
+            # Call base model's autoregressive generation method
+            with torch.no_grad():
+                outputs = self.base_model.forward_inference(
+                    samples=samples,
+                    use_cache=use_cache
+                )
 
-        with torch.no_grad():
-            outputs = self.base_model(samples, seq_kwargs=dummy_seq_kwargs)
+            # Clean up decoder attributes after generation
+            self.base_model.transformer.decoder.support_features = None
+            self.base_model.transformer.decoder.support_mask = None
 
-        # Clean up
-        self.base_model.transformer.decoder.support_features = None
-        self.base_model.transformer.decoder.support_mask = None
-
-        # Decode predictions
-        pred_logits = outputs['pred_logits']  # (B, seq_len, vocab_size)
-        pred_coords = outputs['pred_coords']  # (B, seq_len, 2)
-
-        # Get token predictions
-        pred_tokens = pred_logits.argmax(dim=-1)  # (B, seq_len)
+        # 3. Extract predictions from autoregressive outputs
+        # The base model's forward_inference returns:
+        #   - 'pred_logits': token classification logits (B, seq_len, vocab_size)
+        #   - 'pred_coords': decoded coordinates (B, seq_len, 2)
+        #   - 'gen_out': generated output sequence (raw coordinates)
+        
+        pred_logits = outputs.get('pred_logits')  # (B, seq_len, vocab_size)
+        pred_coords = outputs.get('pred_coords')  # (B, seq_len, 2)
+        
+        # If logits not in outputs, reconstruct from gen_out
+        if pred_logits is None:
+            # Some base models may only return gen_out (list of coordinate lists)
+            # In this case, we'll use pred_coords directly
+            gen_out = outputs.get('gen_out', [])
+            # Convert gen_out to tensor if needed
+            if gen_out and isinstance(gen_out, list):
+                # gen_out is list of lists: [[coords], [coords], ...]
+                max_len = max(len(seq) for seq in gen_out)
+                B = len(gen_out)
+                pred_coords = torch.zeros((B, max_len, 2), device=support_coords.device)
+                for i, seq in enumerate(gen_out):
+                    coords = torch.tensor(seq, device=support_coords.device)
+                    pred_coords[i, :len(seq)] = coords
+        
+        # Get token predictions (argmax over vocabulary)
+        # These are the actual generated token IDs
+        if pred_logits is not None:
+            pred_tokens = pred_logits.argmax(dim=-1)  # (B, seq_len)
+        else:
+            # If no logits available, return None for sequences
+            pred_tokens = None
 
         return {
-            'sequences': pred_tokens,
-            'coordinates': pred_coords,
-            'logits': pred_logits
+            'sequences': pred_tokens,      # (B, seq_len) - generated token IDs
+            'coordinates': pred_coords,     # (B, seq_len, 2) - decoded coordinates
+            'logits': pred_logits          # (B, seq_len, vocab_size) - token logits (may be None)
         }
 
 

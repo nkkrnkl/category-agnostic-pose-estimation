@@ -86,7 +86,13 @@ def compute_pck_bbox(
         visible_mask = np.ones(num_keypoints, dtype=bool)
     else:
         # Only evaluate keypoints with visibility > 0
-        visible_mask = np.array(visibility) > 0
+        visibility_array = np.array(visibility)
+        
+        # Sanity check: visibility and keypoints must have same length
+        assert len(visibility_array) == num_keypoints, \
+            f"Visibility length ({len(visibility_array)}) must match keypoints ({num_keypoints})"
+        
+        visible_mask = visibility_array > 0
     
     num_visible = visible_mask.sum()
     
@@ -228,8 +234,8 @@ class PCKEvaluator:
     
     def add_batch(
         self,
-        pred_keypoints: torch.Tensor,
-        gt_keypoints: torch.Tensor,
+        pred_keypoints,  # Can be Tensor (B, N, 2) or List[Tensor (N_i, 2)] for variable-length
+        gt_keypoints,    # Can be Tensor (B, N, 2) or List[Tensor (N_i, 2)] for variable-length
         bbox_widths: torch.Tensor,
         bbox_heights: torch.Tensor,
         category_ids: Optional[torch.Tensor] = None,
@@ -240,24 +246,40 @@ class PCKEvaluator:
         Add a batch of predictions to the evaluator.
         
         Args:
-            pred_keypoints: Predicted keypoints, shape (B, N, 2)
-            gt_keypoints: Ground truth keypoints, shape (B, N, 2)
+            pred_keypoints: Predicted keypoints
+                - Tensor of shape (B, N, 2) for fixed-length batches, OR
+                - List of Tensors [(N_1, 2), (N_2, 2), ...] for variable-length sequences
+            gt_keypoints: Ground truth keypoints (same format as pred_keypoints)
             bbox_widths: Bbox widths, shape (B,)
             bbox_heights: Bbox heights, shape (B,)
             category_ids: Category IDs, shape (B,) or None
-            visibility: Visibility flags, shape (B, N) or None
+            visibility: Visibility flags, List[List] or Tensor (B, N) or None
             image_ids: List of image IDs for tracking (optional)
         """
-        batch_size = pred_keypoints.shape[0]
+        # Handle both list and tensor inputs
+        if isinstance(pred_keypoints, list):
+            # Variable-length sequences (list of tensors)
+            batch_size = len(pred_keypoints)
+        else:
+            # Fixed-length batch (tensor)
+            batch_size = pred_keypoints.shape[0]
         
         for i in range(batch_size):
+            # Extract per-sample data
+            if isinstance(pred_keypoints, list):
+                pred_i = pred_keypoints[i]  # Already (N_i, 2)
+                gt_i = gt_keypoints[i]      # Already (N_i, 2)
+            else:
+                pred_i = pred_keypoints[i]  # (N, 2)
+                gt_i = gt_keypoints[i]      # (N, 2)
+            
             vis = visibility[i] if visibility is not None else None
             cat_id = category_ids[i].item() if category_ids is not None else 0
             img_id = image_ids[i] if image_ids is not None else None
             
             pck, correct, visible = compute_pck_bbox(
-                pred_keypoints[i],
-                gt_keypoints[i],
+                pred_i,
+                gt_i,
                 bbox_widths[i].item(),
                 bbox_heights[i].item(),
                 visibility=vis,

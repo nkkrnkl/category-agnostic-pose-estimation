@@ -20,12 +20,13 @@ import numpy as np
 import util.misc as utils
 from typing import Iterable, Optional, Dict
 from util.eval_utils import PCKEvaluator, compute_pck_bbox
+from tqdm import tqdm
 
 
 def train_one_epoch_episodic(model: torch.nn.Module, criterion: torch.nn.Module,
                              data_loader: Iterable, optimizer: torch.optim.Optimizer,
                              device: torch.device, epoch: int, max_norm: float = 0,
-                             print_freq: int = 10):
+                             print_freq: int = 10, accumulation_steps: int = 1):
     """
     Train one epoch with episodic sampling.
 
@@ -42,6 +43,7 @@ def train_one_epoch_episodic(model: torch.nn.Module, criterion: torch.nn.Module,
         epoch: Current epoch number
         max_norm: Gradient clipping max norm
         print_freq: Print frequency
+        accumulation_steps: Number of mini-batches to accumulate gradients over (default: 1, no accumulation)
 
     Returns:
         stats: Dictionary of training statistics
@@ -53,15 +55,34 @@ def train_one_epoch_episodic(model: torch.nn.Module, criterion: torch.nn.Module,
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     # Note: class_error meter will be added dynamically if present in loss_dict
     header = f'Epoch: [{epoch}]'
+    
+    # Initialize gradients to zero at start of epoch
+    optimizer.zero_grad()
 
-    for batch_idx, batch in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
+    # Wrap data_loader with tqdm for progress bar
+    # mininterval: update at most once per 2 seconds
+    # miniters: update at least every 20 iterations
+    pbar = tqdm(data_loader, desc=f'Epoch {epoch}', leave=True, ncols=100, 
+                mininterval=2.0, miniters=20)
+    
+    for batch_idx, batch in enumerate(pbar):
+        # ========================================================================
         # Move batch to device
-        support_images = batch['support_images'].to(device)  # (B, C, H, W)
-        support_coords = batch['support_coords'].to(device)  # (B, N, 2)
-        support_masks = batch['support_masks'].to(device)    # (B, N)
-        query_images = batch['query_images'].to(device)      # (B*Q, C, H, W)
+        # ========================================================================
+        # NOTE: After episodic_collate_fn fix #1, support tensors are REPEATED
+        # to match query batch size. Each support is repeated K times (once per
+        # query in that episode), ensuring support[i] pairs with query[i].
+        #
+        # Shapes (where B=num_episodes, K=queries_per_episode):
+        #   - All tensors have first dimension (B*K) for proper alignment
+        # ========================================================================
+        support_images = batch['support_images'].to(device)  # (B*K, C, H, W) - repeated!
+        support_coords = batch['support_coords'].to(device)  # (B*K, N, 2) - repeated!
+        support_masks = batch['support_masks'].to(device)    # (B*K, N) - repeated!
+        query_images = batch['query_images'].to(device)      # (B*K, C, H, W)
 
-        # Skeleton edges (list, not moved to device - used in adjacency matrix construction)
+        # Skeleton edges (list of length B*K, not moved to device)
+        # Used in adjacency matrix construction for graph-based encoding
         support_skeletons = batch.get('support_skeletons', None)
 
         # Query targets (seq_data)
@@ -100,20 +121,69 @@ def train_one_epoch_episodic(model: torch.nn.Module, criterion: torch.nn.Module,
             print(loss_dict_reduced)
             sys.exit(1)
 
-        # Backward pass
-        optimizer.zero_grad()
-        losses.backward()
-
-        if max_norm > 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
-
-        optimizer.step()
+        # ========================================================================
+        # CRITICAL FIX: Gradient Accumulation for Small Batch Sizes
+        # ========================================================================
+        # Problem: Small batch sizes (e.g., 2 episodes) lead to noisy gradients
+        #
+        # Solution: Accumulate gradients over multiple mini-batches before updating
+        #   - Divide loss by accumulation_steps (average across mini-batches)
+        #   - Call optimizer.step() only every accumulation_steps iterations
+        #   - Effective batch size = batch_size * accumulation_steps
+        #
+        # Example with batch_size=2, accumulation_steps=4:
+        #   - Physical batch size: 2 episodes
+        #   - Effective batch size: 8 episodes (accumulated gradients)
+        #   - Memory: Same as batch_size=2 (no extra memory!)
+        #   - Gradient quality: Same as batch_size=8
+        # ========================================================================
+        
+        # Normalize loss by accumulation steps
+        # This ensures gradient magnitudes are consistent regardless of accumulation
+        normalized_loss = losses / accumulation_steps
+        
+        # Backward pass (accumulate gradients)
+        normalized_loss.backward()
+        
+        # Only update weights every accumulation_steps iterations
+        if (batch_idx + 1) % accumulation_steps == 0:
+            # Gradient clipping (applied to accumulated gradients)
+            if max_norm > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+            
+            # Update weights
+            optimizer.step()
+            
+            # Clear accumulated gradients
+            optimizer.zero_grad()
 
         # Update metrics
         metric_logger.update(loss=loss_value, **loss_dict_reduced_scaled, **loss_dict_reduced_unscaled)
         if 'class_error' in loss_dict_reduced:
             metric_logger.update(class_error=loss_dict_reduced['class_error'])
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
+        
+        # Update tqdm progress bar with current metrics
+        pbar.set_postfix({
+            'loss': f'{loss_value:.4f}',
+            'loss_ce': f'{loss_dict_reduced_scaled.get("loss_ce", 0):.4f}',
+            'loss_coords': f'{loss_dict_reduced_scaled.get("loss_coords", 0):.4f}',
+            'lr': f'{optimizer.param_groups[0]["lr"]:.6f}'
+        })
+
+    # ========================================================================
+    # Handle remaining accumulated gradients (if epoch doesn't end on accumulation boundary)
+    # ========================================================================
+    # If the total number of batches is not divisible by accumulation_steps,
+    # we need to perform a final update with the remaining accumulated gradients.
+    # ========================================================================
+    total_batches = batch_idx + 1
+    if total_batches % accumulation_steps != 0:
+        print(f"  → Performing final gradient update with remaining {total_batches % accumulation_steps} accumulated batches")
+        if max_norm > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+        optimizer.step()
+        optimizer.zero_grad()
 
     # Gather stats from all processes
     metric_logger.synchronize_between_processes()
@@ -207,14 +277,26 @@ def evaluate_cape(model, criterion, data_loader, device, compute_pck=True, pck_t
     # PCK evaluator (if enabled)
     pck_evaluator = PCKEvaluator(threshold=pck_threshold) if compute_pck else None
 
-    for batch in metric_logger.log_every(data_loader, 10, header):
+    # Wrap data_loader with tqdm for progress bar
+    # mininterval: update at most once per 2 seconds
+    # miniters: update at least every 10 iterations
+    pbar = tqdm(data_loader, desc='Validation', leave=True, ncols=100,
+                mininterval=2.0, miniters=10)
+    
+    for batch in pbar:
+        # ========================================================================
         # Move batch to device
-        support_images = batch['support_images'].to(device)
-        support_coords = batch['support_coords'].to(device)
-        support_masks = batch['support_masks'].to(device)
-        query_images = batch['query_images'].to(device)
+        # ========================================================================
+        # NOTE: After episodic_collate_fn fix #1, all tensors have matching
+        # batch size (B*K) where each support is repeated K times to align
+        # with its corresponding queries.
+        # ========================================================================
+        support_images = batch['support_images'].to(device)  # (B*K, C, H, W)
+        support_coords = batch['support_coords'].to(device)  # (B*K, N, 2)
+        support_masks = batch['support_masks'].to(device)    # (B*K, N)
+        query_images = batch['query_images'].to(device)      # (B*K, C, H, W)
 
-        # Skeleton edges
+        # Skeleton edges (list of length B*K)
         support_skeletons = batch.get('support_skeletons', None)
 
         query_targets = {}
@@ -243,11 +325,19 @@ def evaluate_cape(model, criterion, data_loader, device, compute_pck=True, pck_t
         loss_dict_reduced_unscaled = {f'{k}_unscaled': v for k, v in loss_dict_reduced.items()}
 
         # Update metrics
-        metric_logger.update(loss=sum(loss_dict_reduced_scaled.values()),
+        val_loss = sum(loss_dict_reduced_scaled.values())
+        metric_logger.update(loss=val_loss,
                            **loss_dict_reduced_scaled,
                            **loss_dict_reduced_unscaled)
         if 'class_error' in loss_dict_reduced:
             metric_logger.update(class_error=loss_dict_reduced['class_error'])
+        
+        # Update tqdm progress bar
+        pbar.set_postfix({
+            'loss': f'{val_loss:.4f}',
+            'loss_ce': f'{loss_dict_reduced_scaled.get("loss_ce", 0):.4f}',
+            'loss_coords': f'{loss_dict_reduced_scaled.get("loss_coords", 0):.4f}'
+        })
         
         # Compute PCK if enabled
         if compute_pck and pck_evaluator is not None:
@@ -269,22 +359,76 @@ def evaluate_cape(model, criterion, data_loader, device, compute_pck=True, pck_t
                         gt_coords, token_labels, mask
                     )
                     
-                    # Get bbox dimensions from query_metadata
-                    # Note: bbox info needs to be passed through from dataloader
-                    # For now, assume normalized coordinates and bbox is [512, 512]
-                    # TODO: Pass actual bbox dimensions through batch
-                    batch_size = pred_kpts.shape[0]
-                    bbox_widths = torch.full((batch_size,), 512.0, device=device)
-                    bbox_heights = torch.full((batch_size,), 512.0, device=device)
+                    # ================================================================
+                    # CRITICAL FIX: Use actual bbox dimensions from query_metadata
+                    # ================================================================
+                    # PCK@bbox requires normalization by the original bbox diagonal.
+                    # Previously used dummy 512x512, now using actual bbox dimensions.
+                    # ================================================================
                     
-                    # Add to PCK evaluator
+                    batch_size = pred_kpts.shape[0]
+                    query_metadata = batch.get('query_metadata', None)
+                    
+                    if query_metadata is not None and len(query_metadata) > 0:
+                        # ================================================================
+                        # CRITICAL FIX: Handle variable-length keypoint sequences
+                        # ================================================================
+                        # Different categories have different numbers of keypoints!
+                        # E.g., "beaver_body" has 17, "przewalskihorse_face" has 9
+                        # 
+                        # The model outputs a fixed sequence length (max keypoints seen)
+                        # but we need to trim predictions to match each category's actual
+                        # number of keypoints for PCK evaluation.
+                        # ================================================================
+                        
+                        # Extract actual bbox dimensions from metadata
+                        bbox_widths = []
+                        bbox_heights = []
+                        visibility_list = []
+                        pred_kpts_trimmed = []
+                        gt_kpts_trimmed = []
+                        
+                        for idx, meta in enumerate(query_metadata):
+                            bbox_w = meta.get('bbox_width', 512.0)
+                            bbox_h = meta.get('bbox_height', 512.0)
+                            bbox_widths.append(bbox_w)
+                            bbox_heights.append(bbox_h)
+                            
+                            vis = meta.get('visibility', [])
+                            num_kpts_for_category = len(vis)  # Actual number of keypoints for this category
+                            
+                            # Trim predictions and ground truth to match this category's keypoint count
+                            # This handles variable-length sequences across different MP-100 categories
+                            pred_kpts_trimmed.append(pred_kpts[idx, :num_kpts_for_category, :])  # (num_kpts, 2)
+                            gt_kpts_trimmed.append(gt_kpts[idx, :num_kpts_for_category, :])      # (num_kpts, 2)
+                            
+                            visibility_list.append(vis)
+                        
+                        # Note: We DON'T stack pred_kpts_trimmed / gt_kpts_trimmed because they may have
+                        # different lengths. Instead, we'll pass them as lists to add_batch,
+                        # which processes each sample individually anyway.
+                        
+                        bbox_widths = torch.tensor(bbox_widths, device=device)
+                        bbox_heights = torch.tensor(bbox_heights, device=device)
+                    else:
+                        # Fallback to 512x512 if metadata not available
+                        print(f"⚠️  WARNING: query_metadata not available, falling back to 512x512 bbox (batch_size={batch_size})")
+                        bbox_widths = torch.full((batch_size,), 512.0, device=device)
+                        bbox_heights = torch.full((batch_size,), 512.0, device=device)
+                        visibility_list = None
+                        pred_kpts_trimmed = pred_kpts  # Use original predictions (no trimming)
+                        gt_kpts_trimmed = gt_kpts
+                    
+                    # Add to PCK evaluator with actual bbox dimensions and visibility
+                    # Note: pred_kpts_trimmed and gt_kpts_trimmed are LISTS of tensors
+                    # with potentially different lengths (per category)
                     pck_evaluator.add_batch(
-                        pred_keypoints=pred_kpts,
-                        gt_keypoints=gt_kpts,
+                        pred_keypoints=pred_kpts_trimmed,
+                        gt_keypoints=gt_kpts_trimmed,
                         bbox_widths=bbox_widths,
                         bbox_heights=bbox_heights,
                         category_ids=batch.get('category_ids', None),
-                        visibility=None  # TODO: Pass visibility from metadata
+                        visibility=visibility_list  # Now includes actual visibility from metadata
                     )
 
     # Gather stats
@@ -349,15 +493,25 @@ def evaluate_unseen_categories(
 
     num_batches = 0
     
-    for batch in metric_logger.log_every(data_loader, 10, header):
+    # Wrap data_loader with tqdm for progress bar
+    # mininterval: update at most once per 2 seconds
+    # miniters: update at least every 10 iterations
+    pbar = tqdm(data_loader, desc=f'Test (Unseen) PCK@{pck_threshold}', leave=True, ncols=100,
+                mininterval=2.0, miniters=10)
+    
+    for batch in pbar:
         num_batches += 1
         
+        # ========================================================================
         # Move batch to device
-        support_images = batch['support_images'].to(device)
-        support_coords = batch['support_coords'].to(device)
-        support_masks = batch['support_masks'].to(device)
-        query_images = batch['query_images'].to(device)
-        support_skeletons = batch.get('support_skeletons', None)
+        # ========================================================================
+        # NOTE: All tensors have matching batch size (B*K) after collate_fn fix
+        # ========================================================================
+        support_images = batch['support_images'].to(device)  # (B*K, C, H, W)
+        support_coords = batch['support_coords'].to(device)  # (B*K, N, 2)
+        support_masks = batch['support_masks'].to(device)    # (B*K, N)
+        query_images = batch['query_images'].to(device)      # (B*K, C, H, W)
+        support_skeletons = batch.get('support_skeletons', None)  # List[B*K]
 
         # Get category IDs and metadata
         category_ids = batch.get('category_ids', None)
@@ -370,18 +524,23 @@ def evaluate_unseen_categories(
 
         # Forward pass (inference mode - NO teacher forcing)
         # Use forward_inference for autoregressive generation
+        # ================================================================
+        # CRITICAL FIX: Pass skeleton_edges to enable structural encoding
+        # ================================================================
         try:
             if hasattr(model, 'module'):
                 predictions = model.module.forward_inference(
                     samples=query_images,
                     support_coords=support_coords,
-                    support_mask=support_masks
+                    support_mask=support_masks,
+                    skeleton_edges=support_skeletons  # Now includes skeleton structure!
                 )
             else:
                 predictions = model.forward_inference(
                     samples=query_images,
                     support_coords=support_coords,
-                    support_mask=support_masks
+                    support_mask=support_masks,
+                    skeleton_edges=support_skeletons  # Now includes skeleton structure!
                 )
         except AttributeError:
             # Fallback: use regular forward but extract from outputs
@@ -466,6 +625,14 @@ def evaluate_unseen_categories(
                     category_ids=category_ids,
                     visibility=visibility
                 )
+                
+                # Update tqdm with current PCK
+                current_results = pck_evaluator.get_results()
+                pbar.set_postfix({
+                    'PCK': f'{current_results["pck_overall"]:.2%}',
+                    'correct': current_results['total_correct'],
+                    'visible': current_results['total_visible']
+                })
 
     # Get final results
     results = pck_evaluator.get_results()

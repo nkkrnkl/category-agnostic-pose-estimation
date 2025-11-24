@@ -35,7 +35,7 @@ class EpisodicSampler:
         Args:
             dataset: MP100CAPE dataset instance
             category_split_file: Path to category_splits.json
-            split: 'train' or 'test' (determines which categories to use)
+            split: 'train', 'val', or 'test' (determines which categories to use)
             num_queries_per_episode: Number of query images per episode
             seed: Random seed for reproducibility
         """
@@ -53,10 +53,12 @@ class EpisodicSampler:
 
         if split == 'train':
             self.categories = category_splits['train']
+        elif split == 'val':
+            self.categories = category_splits['val']
         elif split == 'test':
             self.categories = category_splits['test']
         else:
-            raise ValueError(f"Unknown split: {split}")
+            raise ValueError(f"Unknown split: {split}. Must be 'train', 'val', or 'test'")
 
         print(f"Episodic sampler for {split} split: {len(self.categories)} categories")
 
@@ -140,7 +142,7 @@ class EpisodicDataset(data.Dataset):
         Args:
             base_dataset: MP100CAPE dataset instance
             category_split_file: Path to category_splits.json
-            split: 'train' or 'test'
+            split: 'train', 'val', or 'test'
             num_queries_per_episode: Number of query images per episode
             episodes_per_epoch: Number of episodes per training epoch
             seed: Random seed
@@ -192,15 +194,61 @@ class EpisodicDataset(data.Dataset):
                 # Extract support pose graph (normalized coordinates)
                 support_coords = torch.tensor(support_data['keypoints'], dtype=torch.float32)
 
-                # Normalize support coordinates to [0, 1] using bbox dimensions
-                # Note: After mp100_cape.py modifications, keypoints are already bbox-relative
-                # and height/width are the dimensions AFTER transform (512x512)
-                h, w = support_data['height'], support_data['width']
-                support_coords[:, 0] /= w  # x normalized by width
-                support_coords[:, 1] /= h  # y normalized by height
+                # ================================================================
+                # Normalize support coordinates to [0, 1]
+                # ================================================================
+                # Pipeline of transformations (from mp100_cape.py):
+                #   1. Keypoints made bbox-relative (subtract bbox_x, bbox_y)
+                #   2. Image cropped to bbox and resized to 512x512
+                #   3. Keypoints scaled proportionally: kpt × (512 / bbox_dim)
+                #   4. Here: Normalize by 512 to get [0, 1]
+                #
+                # Mathematical equivalence:
+                #   (kpt × 512/bbox_dim) / 512 = kpt / bbox_dim
+                #
+                # Result: Keypoints are normalized relative to original bbox dimensions,
+                # which provides scale and translation invariance for 1-shot learning.
+                # ================================================================
+                h, w = support_data['height'], support_data['width']  # Both are 512 after resize
+                support_coords[:, 0] /= w  # Normalize x to [0, 1]
+                support_coords[:, 1] /= h  # Normalize y to [0, 1]
 
-                # Create support mask (all valid for now)
-                support_mask = torch.ones(len(support_coords), dtype=torch.bool)
+                # ================================================================
+                # CRITICAL FIX: Create support mask based on visibility
+                # ================================================================
+                # Previously: support_mask was all True (ignoring visibility)
+                # Now: Use visibility information to mark only visible keypoints as valid
+                #
+                # Visibility values (COCO format):
+                #   0 = not labeled (keypoint outside image or not annotated)
+                #   1 = labeled but not visible (occluded)
+                #   2 = labeled and visible
+                #
+                # For support mask:
+                #   - True (valid) if visibility > 0 (labeled, may be occluded)
+                #   - False (invalid) if visibility == 0 (not labeled)
+                # ================================================================
+                
+                # Ensure visibility is present
+                if 'visibility' not in support_data:
+                    raise KeyError(
+                        f"Support data for image {support_data.get('image_id', 'unknown')} "
+                        f"is missing 'visibility' field."
+                    )
+                
+                support_visibility = support_data['visibility']
+                
+                # Verify length matches keypoints
+                if len(support_visibility) != len(support_coords):
+                    raise ValueError(
+                        f"Support visibility length ({len(support_visibility)}) doesn't match "
+                        f"keypoints length ({len(support_coords)}) for image {support_data.get('image_id', 'unknown')}"
+                    )
+                
+                support_mask = torch.tensor(
+                    [v > 0 for v in support_visibility], 
+                    dtype=torch.bool
+                )
 
                 # Extract skeleton edges for support pose graph
                 support_skeleton = support_data.get('skeleton', [])
@@ -214,16 +262,41 @@ class EpisodicDataset(data.Dataset):
                     query_data = self.base_dataset[query_idx]
                     query_images.append(query_data['image'])
                     query_targets.append(query_data['seq_data'])
+                    
+                    # ================================================================
+                    # CRITICAL: Ensure visibility is always present
+                    # ================================================================
+                    # The fallback should NEVER be used if the dataset is correct.
+                    # If 'visibility' is missing, it indicates a bug in mp100_cape.py
+                    # ================================================================
+                    if 'visibility' not in query_data:
+                        raise KeyError(
+                            f"Query data for image {query_data.get('image_id', 'unknown')} "
+                            f"is missing 'visibility' field. This indicates mp100_cape.py "
+                            f"did not set it properly. Available keys: {list(query_data.keys())}"
+                        )
+                    
+                    # Verify lengths match
+                    num_kpts = len(query_data['keypoints'])
+                    visibility = query_data['visibility']
+                    if len(visibility) != num_kpts:
+                        raise ValueError(
+                            f"Visibility length ({len(visibility)}) doesn't match "
+                            f"keypoints length ({num_kpts}) for image {query_data.get('image_id', 'unknown')}. "
+                            f"This indicates a bug in mp100_cape.py coordinate/visibility handling."
+                        )
+                    
                     query_metadata.append({
                         'image_id': query_data['image_id'],
                         'height': query_data['height'],
                         'width': query_data['width'],
                         'keypoints': query_data['keypoints'],
-                        'num_keypoints': query_data['num_keypoints'],
+                        'num_keypoints': query_data['num_keypoints'],  # Total keypoints (after fix)
+                        'num_visible_keypoints': query_data.get('num_visible_keypoints', query_data['num_keypoints']),
                         'bbox': query_data.get('bbox', [0, 0, query_data['width'], query_data['height']]),
                         'bbox_width': query_data.get('bbox_width', query_data['width']),
                         'bbox_height': query_data.get('bbox_height', query_data['height']),
-                        'visibility': query_data.get('visibility', [1] * query_data['num_keypoints'])
+                        'visibility': visibility  # Guaranteed to be correct length
                     })
 
                 # Successfully loaded all images - return the episode
@@ -272,6 +345,7 @@ def episodic_collate_fn(batch):
     support_skeletons = []
     query_images_list = []
     query_targets_list = []
+    query_metadata_list = []  # NEW: Collect query metadata
     category_ids = []
 
     for episode in batch:
@@ -281,6 +355,7 @@ def episodic_collate_fn(batch):
         support_skeletons.append(episode['support_skeleton'])
         query_images_list.extend(episode['query_images'])
         query_targets_list.extend(episode['query_targets'])
+        query_metadata_list.extend(episode['query_metadata'])  # NEW: Extract query metadata
         category_ids.append(episode['category_id'])
 
     # Stack support images
@@ -306,21 +381,88 @@ def episodic_collate_fn(batch):
     support_masks = torch.stack(support_masks_padded)  # (B, max_kpts)
 
     # Stack query images
-    query_images = torch.stack(query_images_list)  # (B*Q, C, H, W)
+    query_images = torch.stack(query_images_list)  # (B*K, C, H, W)
 
     # Collate query targets (seq_data)
     batched_seq_data = {}
     for key in query_targets_list[0].keys():
         batched_seq_data[key] = torch.stack([qt[key] for qt in query_targets_list])
 
+    # ========================================================================
+    # CRITICAL FIX: Align support and query dimensions for 1-shot learning
+    # ========================================================================
+    # Currently we have:
+    #   - support_coords:  (B, max_kpts, 2)  where B = number of episodes
+    #   - query_images:    (B*K, C, H, W)    where K = queries per episode
+    # 
+    # Problem: The model cannot tell which support goes with which query
+    # because support is per-episode but queries are flattened across episodes.
+    #
+    # Solution: Repeat each support K times (once per query in that episode)
+    # so that support_coords[i] corresponds to query_images[i].
+    #
+    # After this fix:
+    #   - support_coords:  (B*K, max_kpts, 2)
+    #   - query_images:    (B*K, C, H, W)
+    # Now index i of support matches index i of query ✓
+    # ========================================================================
+    
+    # Determine how many queries per episode (K)
+    num_episodes = len(batch)  # B
+    num_total_queries = len(query_images_list)  # B*K
+    queries_per_episode = num_total_queries // num_episodes  # K
+    
+    # Repeat each support K times using torch.repeat_interleave
+    # repeat_interleave(tensor, repeats, dim=0) repeats each element along dim 0
+    # Example: [A, B] with repeats=2 → [A, A, B, B]
+    support_coords = support_coords.repeat_interleave(queries_per_episode, dim=0)  # (B*K, max_kpts, 2)
+    support_masks = support_masks.repeat_interleave(queries_per_episode, dim=0)  # (B*K, max_kpts)
+    support_images = support_images.repeat_interleave(queries_per_episode, dim=0)  # (B*K, C, H, W)
+    
+    # ========================================================================
+    # ALREADY FIXED (Issue #11): Category IDs repeated per query
+    # ========================================================================
+    # Category IDs must match the (B*K) batch dimension, not just (B).
+    # Each category ID is repeated K times (once per query in that episode).
+    #
+    # Example with B=2 episodes, K=3 queries per episode:
+    #   Before: category_ids = [cat_A, cat_B]  (length 2)
+    #   After:  category_ids = [cat_A, cat_A, cat_A, cat_B, cat_B, cat_B]  (length 6)
+    #
+    # This ensures category_ids[i] corresponds to query[i] in the batch.
+    # ========================================================================
+    
+    # Repeat category_ids to match query dimension
+    category_ids_tensor = torch.tensor(category_ids, dtype=torch.long)  # (B,)
+    category_ids_tensor = category_ids_tensor.repeat_interleave(queries_per_episode)  # (B*K,)
+    
+    # Repeat skeleton edge lists (each skeleton repeated K times)
+    support_skeletons_repeated = []
+    for skeleton in support_skeletons:
+        support_skeletons_repeated.extend([skeleton] * queries_per_episode)
+    # Now support_skeletons_repeated has B*K entries
+
+    # ========================================================================
+    # CRITICAL FIX: Include query_metadata for evaluation
+    # ========================================================================
+    # query_metadata contains essential information for PCK evaluation:
+    #   - bbox_width, bbox_height: Original bbox dimensions for PCK normalization
+    #   - visibility: Keypoint visibility flags for masking in evaluation
+    #   - image_id, height, width: Additional metadata for debugging
+    #
+    # This was previously collected but not passed through, breaking evaluation.
+    # Now it's properly included in the batch for use in engine_cape.py
+    # ========================================================================
+
     return {
-        'support_images': support_images,
-        'support_coords': support_coords,
-        'support_masks': support_masks,
-        'support_skeletons': support_skeletons,  # List of skeleton edge lists
-        'query_images': query_images,
-        'query_targets': batched_seq_data,
-        'category_ids': torch.tensor(category_ids, dtype=torch.long)
+        'support_images': support_images,  # (B*K, C, H, W)
+        'support_coords': support_coords,  # (B*K, max_kpts, 2)
+        'support_masks': support_masks,    # (B*K, max_kpts)
+        'support_skeletons': support_skeletons_repeated,  # List of B*K skeleton edge lists
+        'query_images': query_images,      # (B*K, C, H, W)
+        'query_targets': batched_seq_data, # Dict with tensors of shape (B*K, ...)
+        'query_metadata': query_metadata_list,  # List of B*K metadata dicts
+        'category_ids': category_ids_tensor  # (B*K,)
     }
 
 
@@ -328,12 +470,12 @@ def build_episodic_dataloader(base_dataset, category_split_file, split='train',
                               batch_size=2, num_queries_per_episode=2,
                               episodes_per_epoch=1000, num_workers=2, seed=None):
     """
-    Build episodic dataloader for CAPE training.
+    Build episodic dataloader for CAPE training/validation/testing.
 
     Args:
         base_dataset: MP100CAPE dataset
         category_split_file: Path to category splits JSON
-        split: 'train' or 'test'
+        split: 'train', 'val', or 'test' (determines which categories to use)
         batch_size: Number of episodes per batch
         num_queries_per_episode: Number of query images per episode
         episodes_per_epoch: Total episodes per epoch

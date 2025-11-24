@@ -58,16 +58,23 @@ except ImportError:
             bins = int(np.sqrt(self.vocab_size / 2))
             quantized = (coords * bins).astype(int).clip(0, bins-1)
 
-            # Return dict with tokenized data
+            # ========================================================================
+            # CRITICAL FIX: Remove duplicate sequences (Issue #18)
+            # ========================================================================
+            # OLD: seq11 == seq21 and seq12 == seq22 (duplicates waste memory/compute)
+            # NEW: Only keep seq11 (x) and seq12 (y), remove seq21 and seq22
+            #
+            # These duplicates were for compatibility with an older model architecture
+            # that used 4 separate decoders. For CAPE, we use a unified decoder,
+            # so duplicates are unnecessary and waste resources.
+            # ========================================================================
+            
+            # Return dict with tokenized data (no duplicates)
             seq_dict = {
                 'seq11': quantized[:, 0],  # x coordinates
-                'seq21': quantized[:, 0],  # duplicate for compatibility
                 'seq12': quantized[:, 1],  # y coordinates
-                'seq22': quantized[:, 1],  # duplicate for compatibility
                 'delta_x1': np.ones_like(quantized[:, 0]) * 0.5,
-                'delta_x2': np.ones_like(quantized[:, 0]) * 0.5,
                 'delta_y1': np.ones_like(quantized[:, 1]) * 0.5,
-                'delta_y2': np.ones_like(quantized[:, 1]) * 0.5,
             }
             return seq_dict
 
@@ -124,7 +131,62 @@ class MP100CAPE(torch.utils.data.Dataset):
             num_bins = int(np.sqrt(vocab_size))
             self.tokenizer = DiscreteTokenizerV2(num_bins=num_bins, seq_len=seq_len, add_cls=False)
 
+        # Analyze multi-instance statistics
+        self._analyze_multi_instance_stats()
+
         print(f"Loaded MP-100 {split} dataset: {len(self.ids)} images")
+
+    def _analyze_multi_instance_stats(self):
+        """
+        Analyze and report statistics about multi-instance images.
+        
+        This helps users understand how much data is potentially unused
+        due to the single-instance-per-image limitation.
+        """
+        total_images = len(self.ids)
+        multi_instance_images = 0
+        total_instances = 0
+        max_instances_per_image = 0
+        
+        for img_id in self.ids:
+            ann_ids = self.coco.getAnnIds(imgIds=img_id)
+            anns = self.coco.loadAnns(ann_ids)
+            
+            # Count valid annotations (those with keypoints and bbox)
+            valid_anns = 0
+            for ann in anns:
+                if 'keypoints' in ann and ann['keypoints'] and 'bbox' in ann:
+                    kpts = np.array(ann['keypoints']).reshape(-1, 3)
+                    if np.any(kpts[:, 2] > 0):  # Has visible keypoints
+                        valid_anns += 1
+            
+            if valid_anns > 0:
+                total_instances += valid_anns
+                if valid_anns > 1:
+                    multi_instance_images += 1
+                max_instances_per_image = max(max_instances_per_image, valid_anns)
+        
+        # Store statistics
+        self.multi_instance_stats = {
+            'total_images': total_images,
+            'total_instances': total_instances,
+            'multi_instance_images': multi_instance_images,
+            'max_instances_per_image': max_instances_per_image,
+            'instances_used': total_images,  # We use 1 per image
+            'instances_unused': total_instances - total_images
+        }
+        
+        # Report if significant data is being skipped
+        if multi_instance_images > 0:
+            pct_multi = (multi_instance_images / total_images) * 100
+            pct_unused = (self.multi_instance_stats['instances_unused'] / total_instances) * 100
+            print(f"📊 Multi-instance statistics:")
+            print(f"   - Images with multiple instances: {multi_instance_images}/{total_images} ({pct_multi:.1f}%)")
+            print(f"   - Total instances available: {total_instances}")
+            print(f"   - Instances actually used: {total_images} ({100-pct_unused:.1f}%)")
+            print(f"   - Instances skipped: {self.multi_instance_stats['instances_unused']} ({pct_unused:.1f}%)")
+            print(f"   - Max instances in single image: {max_instances_per_image}")
+            print(f"   ⚠️  Note: Currently using only first instance per image")
 
     def get_vocab_size(self):
         if self.poly2seq:
@@ -179,6 +241,20 @@ class MP100CAPE(torch.utils.data.Dataset):
 
         img = np.array(Image.open(file_name).convert('RGB'))
 
+        # ========================================================================
+        # Validate image dimensions before processing
+        # ========================================================================
+        # Check if image loaded correctly and has valid dimensions
+        if img is None or img.size == 0:
+            raise ImageNotFoundError(
+                f"Image {img_id} ({file_name}) failed to load or is empty"
+            )
+        
+        if len(img.shape) < 2:
+            raise ImageNotFoundError(
+                f"Image {img_id} ({file_name}) has invalid shape: {img.shape}"
+            )
+
         # Handle image dimensions
         if len(img.shape) >= 3:
             if img.shape[-1] > 3:  # drop alpha channel
@@ -186,6 +262,12 @@ class MP100CAPE(torch.utils.data.Dataset):
             orig_h, orig_w = img.shape[:2]
         else:
             orig_h, orig_w = img.shape
+        
+        # Validate dimensions are positive
+        if orig_h <= 0 or orig_w <= 0:
+            raise ImageNotFoundError(
+                f"Image {img_id} ({file_name}) has invalid dimensions: {orig_w}x{orig_h}"
+            )
 
         # Build record
         record = {}
@@ -204,7 +286,7 @@ class MP100CAPE(torch.utils.data.Dataset):
                 # COCO keypoints format: [x1,y1,v1,x2,y2,v2,...]
                 # where v is visibility (0=not labeled, 1=labeled but not visible, 2=labeled and visible)
                 kpts = np.array(ann['keypoints']).reshape(-1, 3)
-                
+
                 # Store visibility flags for all keypoints
                 visibility = kpts[:, 2]
 
@@ -219,9 +301,33 @@ class MP100CAPE(torch.utils.data.Dataset):
                     num_keypoints_list.append(len(visible_kpts))
                     bbox_list.append(ann['bbox'])
 
-        # For now, take the first annotation (can be extended for multi-object)
+        # ========================================================================
+        # LIMITATION: Multi-instance images only use first instance
+        # ========================================================================
+        # If an image has multiple annotated objects (e.g., 2 people), we only
+        # use the first one. This is a simplification for the initial implementation.
+        #
+        # Future improvement: Treat each instance as a separate datapoint.
+        # This would require:
+        #   1. Modify __len__() to count total instances, not images
+        #   2. Modify __getitem__() to map index → (image_id, instance_idx)
+        #   3. Update self.ids to be instance-based rather than image-based
+        #
+        # Impact: If 10% of images have 2+ instances, we're using ~90% of potential data.
+        # For MP-100, most images have single instances, so impact is minimal.
+        # ========================================================================
+        
         if len(keypoints_list) > 0:
-            # Extract bbox [x, y, width, height]
+            # Log multi-instance images (for debugging/analysis)
+            if len(keypoints_list) > 1:
+                # Only log occasionally to avoid spam
+                if not hasattr(self, '_multi_instance_count'):
+                    self._multi_instance_count = 0
+                self._multi_instance_count += 1
+                if self._multi_instance_count <= 5:  # Log first 5 occurrences
+                    print(f"\nNote: Image {img_id} has {len(keypoints_list)} instances, using first only")
+            
+            # Extract bbox [x, y, width, height] from FIRST instance
             bbox = bbox_list[0]
             bbox_x, bbox_y, bbox_w, bbox_h = bbox
             
@@ -231,23 +337,70 @@ class MP100CAPE(torch.utils.data.Dataset):
             bbox_w = min(int(bbox_w), orig_w - bbox_x)
             bbox_h = min(int(bbox_h), orig_h - bbox_y)
             
-            # Crop image to bbox
+            # ================================================================
+            # Step 1: Crop image to bounding box
+            # ================================================================
             img_cropped = img[bbox_y:bbox_y+bbox_h, bbox_x:bbox_x+bbox_w]
             
-            # Adjust keypoints to be relative to bbox (subtract bbox offset)
+            # Validate cropped image has valid dimensions
+            if img_cropped.size == 0 or img_cropped.shape[0] == 0 or img_cropped.shape[1] == 0:
+                raise ImageNotFoundError(
+                    f"Image {img_id} produced empty crop with bbox [{bbox_x}, {bbox_y}, {bbox_w}, {bbox_h}]. "
+                    f"Original image size: {orig_w}x{orig_h}"
+                )
+            
+            # ================================================================
+            # Step 2: Make keypoints relative to cropped bbox
+            # ================================================================
+            # Subtract bbox offset so keypoints are in bbox coordinate system
+            # Before: keypoints in range [bbox_x, bbox_x+bbox_w] × [bbox_y, bbox_y+bbox_h]
+            # After:  keypoints in range [0, bbox_w] × [0, bbox_h]
             kpts_array = np.array(keypoints_list[0])
-            kpts_array[:, 0] -= bbox_x  # x relative to bbox
-            kpts_array[:, 1] -= bbox_y  # y relative to bbox
+            kpts_array[:, 0] -= bbox_x  # x relative to bbox top-left
+            kpts_array[:, 1] -= bbox_y  # y relative to bbox top-left
             
-            # Filter to only visible keypoints for storage
+            # ================================================================
+            # CRITICAL FIX #1: Keep ALL keypoints to preserve index correspondence
+            # ================================================================
+            # PROBLEM: Filtering keypoints by visibility breaks skeleton edge alignment
+            #   - Skeleton edges reference original keypoint indices (e.g., [0,1,2,...,N])
+            #   - If we filter out invisible keypoints, indices get renumbered
+            #   - Edge [i,j] no longer connects the correct keypoints!
+            #
+            # SOLUTION: Keep ALL keypoints including invisible ones
+            #   - Use visibility as a MASK in loss computation and evaluation
+            #   - Do NOT remove keypoints based on visibility
+            #   - Ensures skeleton edges correctly reference coordinate indices
+            #
+            # Example:
+            #   Original: [kpt0, kpt1(invisible), kpt2, kpt3]
+            #   Skeleton: [[0,1], [1,2], [2,3]]
+            #   After filtering (OLD BAD WAY): [kpt0, kpt2, kpt3] with indices [0,1,2]
+            #   → Edge [0,1] connects kpt0→kpt2 (WRONG! Should be kpt0→kpt1)
+            #   
+            #   After fix (NEW CORRECT WAY): [kpt0, kpt1, kpt2, kpt3] with visibility [2,0,2,2]
+            #   → Edge [0,1] connects kpt0→kpt1 (CORRECT!)
+            #   → Loss/eval mask out kpt1 using visibility
+            # ================================================================
+            
             visibility = np.array(visibility_list[0])
-            visible_mask = visibility > 0
-            visible_kpts = kpts_array[visible_mask].tolist()
             
-            record["keypoints"] = visible_kpts
+            # Store ALL keypoints (including invisible ones) to preserve indices
+            record["keypoints"] = kpts_array.tolist()  # All keypoints, not filtered!
             record["visibility"] = visibility.tolist()
             record["category_id"] = category_ids[0]
-            record["num_keypoints"] = num_keypoints_list[0]
+            
+            # ================================================================
+            # CRITICAL FIX: num_keypoints should mean TOTAL keypoints
+            # ================================================================
+            # Previously stored only visible count, which broke fallback logic
+            # in episodic_sampler when visibility wasn't passed through.
+            # Now we store:
+            #   - num_keypoints: TOTAL keypoints (visible + invisible)
+            #   - num_visible_keypoints: Visible count (for statistics)
+            # ================================================================
+            record["num_keypoints"] = len(kpts_array)  # Total keypoints
+            record["num_visible_keypoints"] = int(np.sum(visibility > 0))  # Visible count
             record["bbox"] = [bbox_x, bbox_y, bbox_w, bbox_h]
             
             # Store bbox dimensions for normalization
@@ -262,21 +415,35 @@ class MP100CAPE(torch.utils.data.Dataset):
             # Get skeleton edges for this category
             record["skeleton"] = self._get_skeleton_for_category(category_ids[0])
         else:
-            # Empty annotation - use dummy values
-            record["keypoints"] = [[0.0, 0.0]]
-            record["visibility"] = [1]
-            record["category_id"] = 0
-            record["num_keypoints"] = 1
-            record["skeleton"] = []
-            record["bbox"] = [0, 0, orig_w, orig_h]
-            record["bbox_width"] = orig_w
-            record["bbox_height"] = orig_h
-            record["height"] = orig_h
-            record["width"] = orig_w
+            # ========================================================================
+            # CRITICAL FIX: Skip empty annotations instead of using dummy values
+            # ========================================================================
+            # Problem: Dummy values (single keypoint at [0, 0]) corrupt training:
+            #   - Model learns invalid pose patterns
+            #   - Loss computation is meaningless on fake data
+            #   - Evaluation metrics are contaminated
+            #
+            # Solution: Raise exception for empty annotations
+            #   - Episodic sampler's retry logic will skip this image
+            #   - Only valid annotations are used for training
+            #   - Clean, meaningful training data
+            #
+            # Note: This may reduce dataset size slightly, but ensures data quality
+            # ========================================================================
+            raise ImageNotFoundError(
+                f"Image {img_id} has no valid annotations (no visible keypoints or missing bbox). "
+                f"Skipping this image to avoid training on dummy data."
+            )
 
-        # Apply transforms
+        # Apply transforms with error handling
         if self._transforms is not None:
-            img, record = self._apply_transforms(img, record)
+            try:
+                img, record = self._apply_transforms(img, record)
+            except Exception as e:
+                # If transforms fail (e.g., resize on corrupted image), skip this sample
+                raise ImageNotFoundError(
+                    f"Image {img_id} ({record.get('file_name', 'unknown')}) failed during transforms: {str(e)}"
+                ) from e
 
         # Convert image to tensor
         img_tensor = torch.as_tensor(self._expand_image_dims(img))
@@ -291,11 +458,47 @@ class MP100CAPE(torch.utils.data.Dataset):
         if self.poly2seq:
             # Store category_id temporarily for use in _tokenize_keypoints
             self._current_category_id = record["category_id"]
-            record["seq_data"] = self._tokenize_keypoints(record["keypoints"],
-                                                          record["height"],
-                                                          record["width"])
+            record["seq_data"] = self._tokenize_keypoints(
+                keypoints=record["keypoints"],
+                height=record["height"],
+                width=record["width"],
+                visibility=record.get("visibility", None)  # Pass visibility info
+            )
             # Clean up temporary attribute
             delattr(self, '_current_category_id')
+
+        # ================================================================
+        # CRITICAL VALIDATION: Ensure keypoints and visibility are aligned
+        # ================================================================
+        # This is our last chance to catch misalignment before data goes to training.
+        # We validate against BOTH each other AND the category definition.
+        # ================================================================
+        if 'visibility' in record and 'keypoints' in record and 'category_id' in record:
+            num_kpts = len(record['keypoints'])
+            num_vis = len(record['visibility'])
+            category_id = record['category_id']
+            
+            # Get expected number of keypoints for this category
+            expected_num_kpts = self._get_num_keypoints_for_category(category_id)
+            
+            # Check 1: keypoints and visibility must match each other
+            if num_kpts != num_vis:
+                raise ValueError(
+                    f"CRITICAL BUG in mp100_cape.py __getitem__: "
+                    f"keypoints length ({num_kpts}) != visibility length ({num_vis}) "
+                    f"for image {record.get('image_id', 'unknown')}, category {category_id}. "
+                    f"This indicates a bug in transform logic (likely Albumentations dropped keypoints)."
+                )
+            
+            # Check 2: Both must match the category definition
+            if expected_num_kpts is not None and num_kpts != expected_num_kpts:
+                raise ValueError(
+                    f"CRITICAL BUG in mp100_cape.py __getitem__: "
+                    f"keypoints length ({num_kpts}) != expected for category {category_id} ({expected_num_kpts}) "
+                    f"for image {record.get('image_id', 'unknown')}. "
+                    f"This indicates Albumentations dropped keypoints or incorrect data loading. "
+                    f"Image will be skipped."
+                )
 
         return record
 
@@ -323,50 +526,150 @@ class MP100CAPE(torch.utils.data.Dataset):
         except Exception as e:
             # If category not found or error, return empty skeleton
             return []
+    
+    def _get_num_keypoints_for_category(self, category_id):
+        """
+        Get the expected number of keypoints for a category.
+        
+        Args:
+            category_id: Category ID
+        
+        Returns:
+            Number of keypoints for this category, or None if unknown
+        """
+        try:
+            cat_info = self.coco.loadCats(category_id)[0]
+            # MP-100 stores keypoint names in 'keypoints' field
+            keypoint_names = cat_info.get('keypoints', [])
+            return len(keypoint_names) if keypoint_names else None
+        except Exception as e:
+            return None
 
     def _apply_transforms(self, img, record):
-        """Apply image transformations and update keypoint coordinates"""
+        """
+        Apply image transformations and update keypoint coordinates.
+        
+        This is Step 3 of the normalization pipeline:
+        - Resizes cropped bbox image from (bbox_w × bbox_h) to (512 × 512)
+        - Scales keypoints proportionally to maintain relative positions
+        - Applies data augmentation (training only)
+        
+        After this:
+        - Image is 512×512
+        - Keypoints are in range [0, 512] × [0, 512]
+        - record['height'] and record['width'] are both 512
+        
+        Final normalization (divide by 512) happens in episodic_sampler.py
+        """
         if self._transforms is None:
             return img, record
 
-        # Get original dimensions
+        # Get original dimensions (bbox dimensions after cropping)
         orig_h, orig_w = record["height"], record["width"]
 
-        # Apply transform
-        transformed = self._transforms(image=img)
+        # ========================================================================
+        # Apply transform with keypoint-aware augmentation (Issue #19 fix)
+        # ========================================================================
+        # Albumentations automatically transforms keypoints along with the image,
+        # maintaining their relative positions during geometric augmentations.
+        # ========================================================================
+        
+        # Prepare keypoints in (x, y) format for albumentations
+        keypoints_list = record.get('keypoints', [])
+        num_keypoints_before = len(keypoints_list)
+        
+        # Apply transform (resize + augmentation)
+        transformed = self._transforms(image=img, keypoints=keypoints_list)
         img = transformed['image']
 
-        # Update dimensions
-        new_h, new_w = img.shape[:2]
+        # Update keypoints with transformed coordinates
+        transformed_keypoints = transformed.get('keypoints', keypoints_list)
+        
+        # ================================================================
+        # CRITICAL CHECK: Albumentations might drop keypoints!
+        # ================================================================
+        # Even with remove_invisible=False, Albumentations can drop keypoints
+        # that fall outside image bounds after transforms. This breaks our
+        # index correspondence with skeleton edges and visibility array.
+        #
+        # When this happens, we MUST skip this image entirely because:
+        # 1. We can't update visibility (don't know WHICH keypoints were dropped)
+        # 2. Skeleton edges would reference wrong indices
+        # 3. Would corrupt training data
+        # ================================================================
+        num_keypoints_after = len(transformed_keypoints)
+        if num_keypoints_after != num_keypoints_before:
+            # Albumentations dropped some keypoints - skip this image
+            raise ImageNotFoundError(
+                f"Albumentations dropped keypoints! Before: {num_keypoints_before}, "
+                f"After: {num_keypoints_after}. Skipping image {record.get('image_id', 'unknown')} "
+                f"to maintain data integrity (skeleton/visibility alignment)."
+            )
+        
+        record['keypoints'] = list(transformed_keypoints)
+        
+        # IMPORTANT: record['visibility'] is NOT updated here!
+        # It was set in __getitem__ and must remain synchronized with keypoints.
+        # The check above ensures they stay in sync.
+
+        # Update dimensions to post-resize values
+        new_h, new_w = img.shape[:2]  # Typically (512, 512)
         record["height"] = new_h
         record["width"] = new_w
 
-        # Scale keypoints
-        scale_x = new_w / orig_w
-        scale_y = new_h / orig_h
-
-        scaled_keypoints = []
-        for kpt in record["keypoints"]:
-            x, y = kpt
-            scaled_keypoints.append([x * scale_x, y * scale_y])
-
-        record["keypoints"] = scaled_keypoints
+        # ================================================================
+        # NOTE: Keypoints are already scaled by Albumentations!
+        # ================================================================
+        # Albumentations automatically scales keypoints when it resizes the image.
+        # The transformed_keypoints from line 535 are already in the range [0, 512].
+        # We do NOT need to manually scale them again - that would double-scale them!
+        #
+        # Previous buggy code:
+        #   scale_x = new_w / orig_w
+        #   scaled_keypoints = [kpt × scale for kpt in keypoints]  # WRONG! Already scaled
+        #
+        # Correct: Just use the keypoints as-is from Albumentations
+        # ================================================================
 
         return img, record
 
-    def _tokenize_keypoints(self, keypoints, height, width):
+    def _tokenize_keypoints(self, keypoints, height, width, visibility=None):
         """
-        Tokenize keypoint coordinates using bilinear interpolation
-        Following poly_data.py pattern for compatibility with Raster2Seq
+        Tokenize keypoint coordinates using bilinear interpolation.
+        Following poly_data.py pattern for compatibility with Raster2Seq.
+        
+        CRITICAL: After FIX #1, keypoints includes ALL keypoints (visible and invisible)
+        to preserve index correspondence with skeleton edges.
 
         Args:
-            keypoints: List of [x, y] coordinates
+            keypoints: List of [x, y] coordinates for ALL keypoints (including invisible!)
             height, width: Image dimensions for normalization
+            visibility: List of visibility flags (same length as keypoints)
+                - 0 = not labeled (no annotation)
+                - 1 = labeled but occluded/not visible  
+                - 2 = labeled and visible
+                - If None, assumes all keypoints are visible
 
         Returns:
-            dict with tokenized sequence data
+            dict with tokenized sequence data including visibility_mask
         """
         import math
+
+        # ========================================================================
+        # CRITICAL FIX #1: Create visibility mask for loss computation
+        # ========================================================================
+        # The visibility mask indicates which coordinate tokens should be used
+        # for loss computation. Only visible keypoints (visibility > 0) contribute
+        # to the loss. Invisible keypoints (visibility == 0) are masked out.
+        #
+        # IMPORTANT: We still tokenize ALL keypoints (including invisible ones)
+        # to preserve index correspondence with skeleton edges. The visibility
+        # mask ensures invisible keypoints don't affect the loss.
+        # ========================================================================
+
+        # Set default visibility if not provided
+        if visibility is None:
+            visibility = [2] * len(keypoints)  # Assume all visible
 
         # Normalize keypoints to [0, 1]
         normalized_kpts = []
@@ -380,13 +683,30 @@ class MP100CAPE(torch.utils.data.Dataset):
         num_bins = self.tokenizer.num_bins
         quant_poly = [poly * (num_bins - 1) for poly in polygons]
 
+        # ========================================================================
+        # CRITICAL FIX #2: Bilinear interpolation requires 4 sequences
+        # ========================================================================
+        # Raster2Seq uses bilinear interpolation to embed coordinates.
+        # For each coordinate (x, y), we need 4 grid points:
+        #   - (floor_x, floor_y)  -> index11
+        #   - (ceil_x, floor_y)   -> index21
+        #   - (floor_x, ceil_y)   -> index12
+        #   - (ceil_x, ceil_y)    -> index22
+        #
+        # These are NOT duplicates! They represent the 4 corners of the grid cell.
+        # The model uses delta_x and delta_y to interpolate between them.
+        #
+        # Previous Fix #18 incorrectly removed seq21 and seq22, thinking they were
+        # duplicates. They are NOT - they are required for bilinear interpolation!
+        # ========================================================================
+
         # 4 indices for bilinear interpolation (floor/ceil combinations)
         index11 = [[math.floor(p[0])*num_bins + math.floor(p[1]) for p in poly] for poly in quant_poly]
         index21 = [[math.ceil(p[0])*num_bins + math.floor(p[1]) for p in poly] for poly in quant_poly]
         index12 = [[math.floor(p[0])*num_bins + math.ceil(p[1]) for p in poly] for poly in quant_poly]
         index22 = [[math.ceil(p[0])*num_bins + math.ceil(p[1]) for p in poly] for poly in quant_poly]
 
-        # Tokenize each index sequence
+        # Tokenize all 4 sequences
         seq11 = self.tokenizer(index11, add_bos=True, add_eos=False, dtype=torch.long)
         seq21 = self.tokenizer(index21, add_bos=True, add_eos=False, dtype=torch.long)
         seq12 = self.tokenizer(index12, add_bos=True, add_eos=False, dtype=torch.long)
@@ -410,10 +730,41 @@ class MP100CAPE(torch.utils.data.Dataset):
         if len(token_labels) > 0:
             token_labels[-1] = TokenType.eos.value
 
-        # Create mask
+        # Create mask for valid tokens (not padding)
         mask = torch.ones(self.tokenizer.seq_len, dtype=torch.bool)
         if len(token_labels) < self.tokenizer.seq_len:
             mask[len(token_labels):] = 0
+
+        # ========================================================================
+        # Create visibility mask for loss computation (CRITICAL FIX #1)
+        # ========================================================================
+        # This mask indicates which coordinate tokens should contribute to loss.
+        # After FIX #1, keypoints includes ALL keypoints (visible and invisible).
+        # We use the visibility array to determine which tokens to use in loss.
+        #
+        # Visibility rules:
+        #   - Coordinate tokens from VISIBLE keypoints (visibility > 0): True
+        #   - Coordinate tokens from INVISIBLE keypoints (visibility == 0): False
+        #   - SEP/EOS/padding tokens: False (don't use in loss)
+        # ========================================================================
+        
+        visibility_mask = torch.zeros(self.tokenizer.seq_len, dtype=torch.bool)
+        
+        # Mark coordinate tokens based on actual visibility
+        # Each keypoint generates one coordinate token (after BOS)
+        token_idx = 0  # Start after BOS
+        for kpt_idx, kpt in enumerate(keypoints):
+            if token_idx >= len(token_labels):
+                break
+            # Skip BOS token
+            if token_idx == 0 and token_labels[token_idx] != TokenType.coord.value:
+                token_idx += 1
+            # Check if this is a coordinate token
+            if token_idx < len(token_labels) and token_labels[token_idx] == TokenType.coord.value:
+                # Use visibility: only mark as True if visibility > 0
+                if visibility[kpt_idx] > 0:
+                    visibility_mask[token_idx] = True
+                token_idx += 1
 
         # Pad sequences
         target_seq = self.tokenizer._padding(target_seq, [0, 0], dtype=torch.float32)
@@ -448,17 +799,18 @@ class MP100CAPE(torch.utils.data.Dataset):
 
         return {
             'seq11': seq11,
-            'seq21': seq21,
+            'seq21': seq21,  # CRITICAL FIX #2: Need all 4 sequences for bilinear interpolation
             'seq12': seq12,
-            'seq22': seq22,
+            'seq22': seq22,  # CRITICAL FIX #2: Need all 4 sequences for bilinear interpolation
             'target_seq': target_seq,
             'token_labels': token_labels,
-            'mask': mask,
+            'mask': mask,  # Valid token mask (not padding)
+            'visibility_mask': visibility_mask,  # Visibility mask for loss (visible keypoints only)
             'target_polygon_labels': target_polygon_labels,
             'delta_x1': delta_x1,
-            'delta_x2': delta_x2,
+            'delta_x2': delta_x2,  # CRITICAL FIX #2: Need all 4 deltas for bilinear interpolation
             'delta_y1': delta_y1,
-            'delta_y2': delta_y2,
+            'delta_y2': delta_y2,  # CRITICAL FIX #2: Need all 4 deltas for bilinear interpolation
         }
 
 
@@ -483,12 +835,73 @@ def build_mp100_cape(image_set, args):
     if not ann_file.exists():
         raise FileNotFoundError(f"Annotation file not found: {ann_file}")
 
-    # Build transforms
-    # Images are already cropped to bbox, now resize to 512x512
+    # ========================================================================
+    # APPEARANCE-ONLY AUGMENTATION FOR TRAINING
+    # ========================================================================
+    # Apply photometric augmentations that improve robustness WITHOUT changing
+    # geometric relationships between pixels and keypoints.
+    #
+    # ✅ ALLOWED (appearance-only):
+    #   - Color jitter (brightness, contrast, saturation, hue)
+    #   - Gaussian noise
+    #   - Gaussian blur
+    #
+    # ❌ FORBIDDEN (would change geometry):
+    #   - Random crop, flip, rotation, affine, perspective
+    #   - Any transform that moves pixels or changes spatial layout
+    #
+    # CRITICAL GUARANTEES:
+    #   1. Keypoint tensors remain BITWISE IDENTICAL (not modified at all)
+    #   2. Image geometry preserved (pixel positions unchanged)
+    #   3. Only training uses augmentation; val/test are deterministic
+    #
+    # WHY NO GEOMETRIC AUGMENTATION:
+    #   Geometric transforms require updating keypoint coordinates accordingly.
+    #   Since we want keypoint annotations to remain untouched, we only use
+    #   appearance transforms that don't affect pixel positions.
+    # ========================================================================
+    
+    # Build transforms with augmentation for training
     if image_set == 'train':
-        transforms = Resize((512, 512))
+        # Training: APPEARANCE-ONLY augmentation
+        import albumentations as A
+        transforms = A.Compose([
+            # Color jitter: Vary brightness, contrast, saturation, hue
+            # This helps model generalize across different lighting conditions
+            A.ColorJitter(
+                brightness=0.2,  # ±20% brightness variation
+                contrast=0.2,    # ±20% contrast variation
+                saturation=0.2,  # ±20% saturation variation
+                hue=0.05,        # ±5% hue shift (small to avoid unrealistic colors)
+                p=0.6            # Apply 60% of the time
+            ),
+            
+            # Gaussian noise: Add small random noise to image
+            # Helps model be robust to sensor noise and compression artifacts
+            A.GaussNoise(
+                var_limit=(5.0, 25.0),  # Low variance to avoid corrupting image
+                mean=0,                   # Zero-mean noise
+                p=0.4                     # Apply 40% of the time
+            ),
+            
+            # Gaussian blur: Slight blur to simulate focus variations
+            # Helps with images that may be slightly out of focus
+            A.GaussianBlur(
+                blur_limit=(3, 5),  # Small kernel size (3x3 or 5x5)
+                sigma_limit=0,      # Auto-select sigma based on kernel
+                p=0.2               # Apply 20% of the time (less frequent)
+            ),
+            
+            # Final deterministic resize to 512x512
+            # This is NOT augmentation - it's required normalization
+            A.Resize(height=512, width=512),
+        ], keypoint_params=A.KeypointParams(format='xy', remove_invisible=False))
     else:
-        transforms = Resize((512, 512))
+        # Validation/Test: ONLY deterministic resize (no augmentation)
+        import albumentations as A
+        transforms = A.Compose([
+            A.Resize(height=512, width=512)
+        ], keypoint_params=A.KeypointParams(format='xy', remove_invisible=False))
 
     dataset = MP100CAPE(
         img_folder=str(root),

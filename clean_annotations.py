@@ -24,9 +24,9 @@ from collections import defaultdict
 # Paths – adjust PROJECT_ROOT if needed
 # ----------------------------------------------------------------------
 PROJECT_ROOT = Path(
-    "/Users/theodorechronopoulos/Desktop/Cornell Courses/Deep Learning/Project/category-agnostic-pose-estimation"
+    "/Users/pavlosrousoglou/Desktop/Cornell/Deep Learning/category-agnostic-pose-estimation"
 )
-ANNOTATIONS_DIR = PROJECT_ROOT / "annotations"
+ANNOTATIONS_DIR = PROJECT_ROOT / "data" / "annotations"
 IMAGES_DIR = PROJECT_ROOT / "data"
 # The dataset loader prepends 'data/' to paths, so we need to check for this
 DATA_PREFIX = "data/"
@@ -288,7 +288,11 @@ def main():
         return
 
     # Find all JSON annotation files in the annotations directory
-    annotation_files = sorted(ANNOTATIONS_DIR.glob("*.json"))
+    # Skip macOS metadata files (starting with '._')
+    annotation_files = sorted([
+        f for f in ANNOTATIONS_DIR.glob("*.json") 
+        if not f.name.startswith("._")
+    ])
     if not annotation_files:
         print(f"\nNo annotation files found in {ANNOTATIONS_DIR}")
         return

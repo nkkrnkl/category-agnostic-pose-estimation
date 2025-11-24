@@ -22,6 +22,10 @@ import time
 from pathlib import Path
 import copy
 
+# Enable MPS fallback for operations not yet implemented on Apple Silicon
+# This must be set BEFORE importing torch
+os.environ.setdefault('PYTORCH_ENABLE_MPS_FALLBACK', '1')
+
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
@@ -29,6 +33,7 @@ import util.misc as utils
 from datasets import build_dataset
 from models import build_model
 from models.cape_model import build_cape_model
+from models.cape_losses import build_cape_criterion
 
 # Will create these functions below
 from engine_cape import train_one_epoch_episodic, evaluate_cape
@@ -60,9 +65,13 @@ def get_args_parser():
     parser.add_argument('--lr_linear_proj_mult', default=0.1, type=float)
     parser.add_argument('--batch_size', default=2, type=int,
                         help='Number of episodes per batch')
+    parser.add_argument('--accumulation_steps', default=4, type=int,
+                        help='Number of mini-batches to accumulate gradients over (effective_batch_size = batch_size * accumulation_steps)')
     parser.add_argument('--weight_decay', default=1e-4, type=float)
     parser.add_argument('--epochs', default=300, type=int)
     parser.add_argument('--lr_drop', default='200,250', type=str)
+    parser.add_argument('--early_stopping_patience', default=20, type=int,
+                        help='Stop training if PCK does not improve for N epochs (0 to disable)')
     parser.add_argument('--clip_max_norm', default=0.1, type=float,
                         help='gradient clipping max norm')
 
@@ -163,9 +172,9 @@ def get_device():
     if torch.cuda.is_available():
         device = torch.device("cuda:0")
     elif torch.backends.mps.is_available():
-        os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
         device = torch.device("mps")
-        print("Note: MPS fallback enabled")
+        print("Note: Using MPS (Apple Silicon GPU)")
+        print("      MPS fallback enabled for unsupported ops (e.g., grid_sampler)")
     else:
         device = torch.device("cpu")
     return device
@@ -206,7 +215,14 @@ def main(args):
 
     # Build base model (RoomFormerV2)
     print("Building base Raster2Seq model...")
-    base_model, criterion = build_model(args)
+    base_model, _ = build_model(args)  # Ignore base criterion, we'll use CAPE-specific one
+
+    # Build CAPE-specific criterion with visibility masking
+    print("Building CAPE-specific loss criterion...")
+    num_classes = 3 if not args.add_cls_token else 4  # <coord> <sep> <eos> <cls>
+    criterion = build_cape_criterion(args, num_classes=num_classes)
+    criterion.to(device)
+    print(f"✓ CAPE criterion created with visibility masking support")
 
     # Wrap with CAPE model
     print("Wrapping with CAPE support conditioning...")
@@ -247,22 +263,45 @@ def main(args):
         seed=args.seed
     )
 
-    # For validation, use training dataset with different episodes
-    # (val dataset is too small to have all training categories)
+    # ========================================================================
+    # VALIDATION DATALOADER: Proper meta-learning validation on UNSEEN categories
+    # ========================================================================
+    # MP-100 uses a standard 3-way meta-learning split:
+    #   - Train: 69 categories (seen during training)
+    #   - Val: 10 DIFFERENT categories (unseen during training)
+    #   - Test: 20 DIFFERENT categories (unseen during training & validation)
+    #
+    # Validation purpose:
+    #   → Measure generalization to UNSEEN categories during training
+    #   → Enable early stopping based on true few-shot generalization
+    #   → Tune hyperparameters without contaminating test set
+    #
+    # This is the CORRECT approach for category-agnostic pose estimation:
+    #   Training = seen categories, Validation = unseen categories, Test = held-out unseen
+    # ========================================================================
+    
     val_episodes = max(1, args.episodes_per_epoch // 10)  # At least 1 episode
     val_loader = build_episodic_dataloader(
-        base_dataset=train_dataset,  # Use train dataset but different episodes
+        base_dataset=val_dataset,  # Use validation images with validation categories
         category_split_file=str(category_split_file),
-        split='train',
-        batch_size=args.batch_size,
+        split='val',  # Use VALIDATION categories (unseen during training!)
+        batch_size=1,  # CRITICAL: batch_size=1 to ensure all queries in a batch are from the SAME category
+                       # Each category may have different num_keypoints (e.g., 9 vs 17)
+                       # Model outputs fixed-length sequence based on max keypoints seen
+                       # To avoid shape mismatches during PCK evaluation, keep batch_size=1 for validation
         num_queries_per_episode=args.num_queries_per_episode,
         episodes_per_epoch=val_episodes,
         num_workers=args.num_workers,
-        seed=args.seed + 999  # Different seed for val to get different episodes
+        seed=args.seed + 999  # Different seed for diversity
     )
 
     print(f"Train episodes/epoch: {len(train_loader) * args.batch_size}")
     print(f"Val episodes/epoch: {len(val_loader) * args.batch_size}")
+    print(f"\nGradient Accumulation:")
+    print(f"  - Physical batch size: {args.batch_size} episodes")
+    print(f"  - Accumulation steps: {args.accumulation_steps}")
+    print(f"  - Effective batch size: {args.batch_size * args.accumulation_steps} episodes")
+    print(f"  - Memory usage: Same as {args.batch_size} episodes (no extra memory!)")
 
     # Build optimizer
     param_dicts = [
@@ -282,23 +321,73 @@ def main(args):
     lr_drop_epochs = [int(x) for x in args.lr_drop.split(',')]
     lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, lr_drop_epochs)
 
+    # ========================================================================
+    # CRITICAL FIX: Initialize best-model tracking and RNG state restoration
+    # ========================================================================
+    # These will be updated if resuming from a checkpoint
+    best_val_loss = float('inf')
+    best_pck = 0.0
+    epochs_without_improvement = 0
+    
     # Resume from checkpoint if specified
     if args.resume:
         if os.path.isfile(args.resume):
-            print(f"Resuming from checkpoint: {args.resume}")
-            checkpoint = torch.load(args.resume, map_location='cpu')
+            print(f"\n{'=' * 80}")
+            print(f"RESUMING FROM CHECKPOINT")
+            print(f"{'=' * 80}")
+            print(f"Checkpoint: {args.resume}")
+            
+            checkpoint = torch.load(args.resume, map_location='cpu', weights_only=False)
+            
+            # Restore model, optimizer, scheduler
             model.load_state_dict(checkpoint['model'])
             optimizer.load_state_dict(checkpoint['optimizer'])
             lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
             args.start_epoch = checkpoint['epoch'] + 1
+            print(f"  ✓ Model weights restored")
+            print(f"  ✓ Optimizer state restored")
+            print(f"  ✓ LR scheduler restored")
+            print(f"  ✓ Will resume from epoch {args.start_epoch}")
+            
+            # CRITICAL: Restore best-model tracking to prevent overwriting
+            best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+            best_pck = checkpoint.get('best_pck', 0.0)
+            epochs_without_improvement = checkpoint.get('epochs_without_improvement', 0)
+            print(f"  ✓ Best validation loss restored: {best_val_loss:.4f}")
+            print(f"  ✓ Best PCK restored: {best_pck:.4f}")
+            print(f"  ✓ Epochs without improvement: {epochs_without_improvement}")
+            
+            # CRITICAL: Restore RNG states for reproducibility
+            if 'rng_state' in checkpoint:
+                torch.set_rng_state(checkpoint['rng_state'].cpu())
+                print(f"  ✓ Torch RNG state restored")
+            if 'cuda_rng_state' in checkpoint and torch.cuda.is_available():
+                torch.cuda.set_rng_state_all(checkpoint['cuda_rng_state'])
+                print(f"  ✓ CUDA RNG state restored")
+            if 'np_rng_state' in checkpoint:
+                np.random.set_state(checkpoint['np_rng_state'])
+                print(f"  ✓ NumPy RNG state restored")
+            if 'py_rng_state' in checkpoint:
+                random.setstate(checkpoint['py_rng_state'])
+                print(f"  ✓ Python RNG state restored")
+            
+            print(f"{'=' * 80}\n")
         else:
-            print(f"Checkpoint not found: {args.resume}")
+            print(f"⚠️  Checkpoint not found: {args.resume}")
+            print(f"   Starting training from scratch...\n")
 
     print("\n" + "=" * 80)
     print("Starting Training")
     print("=" * 80 + "\n")
 
-    best_val_loss = float('inf')
+    # ========================================================================
+    # Early stopping tracking
+    # ========================================================================
+    # Note: best_val_loss, best_pck, and epochs_without_improvement are now
+    # initialized before the resume block (lines 318-321) to allow proper
+    # restoration from checkpoint.
+    # ========================================================================
+    early_stop_triggered = False
 
     for epoch in range(args.start_epoch, args.epochs):
         print(f"\nEpoch {epoch + 1}/{args.epochs}")
@@ -313,7 +402,8 @@ def main(args):
             device=device,
             epoch=epoch,
             max_norm=args.clip_max_norm,
-            print_freq=args.print_freq
+            print_freq=args.print_freq,
+            accumulation_steps=args.accumulation_steps
         )
 
         lr_scheduler.step()
@@ -339,38 +429,175 @@ def main(args):
         print(f"  Learning Rate:    {optimizer.param_groups[0]['lr']:.6f}")
         print(f"{'=' * 80}\n")
 
-        # Save checkpoint
-        checkpoint_path = Path(args.output_dir) / f'checkpoint_epoch_{epoch}.pth'
-        torch.save({
+        # ========================================================================
+        # CRITICAL FIX: Checkpoint naming with hyperparameters (Issue #22)
+        # ========================================================================
+        # Include key hyperparameters in checkpoint filename for better tracking:
+        #   - lr: Learning rate
+        #   - bs: Batch size
+        #   - acc: Accumulation steps
+        #   - qpe: Queries per episode
+        #
+        # Example: checkpoint_e010_lr1e-4_bs2_acc4_qpe2.pth
+        #   → Epoch 10, lr=1e-4, batch_size=2, acc_steps=4, queries_per_ep=2
+        # ========================================================================
+        
+        # ========================================================================
+        # Save checkpoint with full training state (including RNG states)
+        # ========================================================================
+        checkpoint_name = (
+            f'checkpoint_e{epoch:03d}_'
+            f'lr{args.lr:.0e}_'
+            f'bs{args.batch_size}_'
+            f'acc{args.accumulation_steps}_'
+            f'qpe{args.num_queries_per_episode}.pth'
+        )
+        checkpoint_path = Path(args.output_dir) / checkpoint_name
+        
+        # Build checkpoint dict with all state
+        checkpoint_dict = {
+            # Model & optimizer state
             'model': model.state_dict(),
             'optimizer': optimizer.state_dict(),
             'lr_scheduler': lr_scheduler.state_dict(),
             'epoch': epoch,
             'args': args,
+            
+            # Training metrics
             'train_stats': train_stats,
-            'val_stats': val_stats
-        }, checkpoint_path)
+            'val_stats': val_stats,
+            
+            # CRITICAL: Best-model tracking (for resume)
+            'best_val_loss': best_val_loss,
+            'best_pck': best_pck,
+            'epochs_without_improvement': epochs_without_improvement,
+            
+            # CRITICAL: RNG states (for reproducibility)
+            'rng_state': torch.get_rng_state(),
+            'np_rng_state': np.random.get_state(),
+            'py_rng_state': random.getstate(),
+        }
+        
+        # Add CUDA RNG state if available
+        if torch.cuda.is_available():
+            checkpoint_dict['cuda_rng_state'] = torch.cuda.get_rng_state_all()
+        
+        torch.save(checkpoint_dict, checkpoint_path)
 
-        # Save best model
+        # ========================================================================
+        # HIGH-PRIORITY FIX: Track and save BOTH best-loss and best-PCK models
+        # EARLY STOPPING: Based on PCK (pose estimation accuracy) not loss
+        # ========================================================================
         val_loss = val_stats.get('loss', float('inf'))
+        val_pck = val_stats.get('pck', 0.0)  # Extract PCK from validation stats
+        
+        # Track best validation loss (for saving best-loss checkpoint)
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            best_path = Path(args.output_dir) / 'checkpoint_best.pth'
-            torch.save({
+            
+            best_loss_name = (
+                f'checkpoint_best_loss_e{epoch:03d}_'
+                f'valloss{val_loss:.4f}_'
+                f'pck{val_pck:.4f}.pth'
+            )
+            best_loss_path = Path(args.output_dir) / best_loss_name
+            
+            # Save full checkpoint (same fields as regular checkpoint)
+            best_loss_dict = {
                 'model': model.state_dict(),
                 'optimizer': optimizer.state_dict(),
                 'lr_scheduler': lr_scheduler.state_dict(),
                 'epoch': epoch,
                 'args': args,
-                'val_loss': val_loss
-            }, best_path)
-            print(f"  → Saved best model (val_loss: {val_loss:.4f})")
+                'val_loss': val_loss,
+                'val_pck': val_pck,
+                'best_val_loss': best_val_loss,
+                'best_pck': best_pck,
+                'epochs_without_improvement': epochs_without_improvement,
+                'rng_state': torch.get_rng_state(),
+                'np_rng_state': np.random.get_state(),
+                'py_rng_state': random.getstate(),
+            }
+            if torch.cuda.is_available():
+                best_loss_dict['cuda_rng_state'] = torch.cuda.get_rng_state_all()
+            
+            torch.save(best_loss_dict, best_loss_path)
+            print(f"  ✓ Saved BEST LOSS model (val_loss: {val_loss:.4f}, PCK: {val_pck:.4f})")
+        
+        # Track best PCK (for best pose estimation performance AND early stopping)
+        # CRITICAL: Early stopping based on PCK, not loss (pose accuracy is the goal!)
+        pck_improved = False
+        if val_pck > best_pck:
+            pck_improved = True
+            best_pck = val_pck
+            epochs_without_improvement = 0  # Reset early stopping counter when PCK improves
+            
+            best_pck_name = (
+                f'checkpoint_best_pck_e{epoch:03d}_'
+                f'pck{val_pck:.4f}_'
+                f'valloss{val_loss:.4f}.pth'
+            )
+            best_pck_path = Path(args.output_dir) / best_pck_name
+            
+            # Save full checkpoint
+            best_pck_dict = {
+                'model': model.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'lr_scheduler': lr_scheduler.state_dict(),
+                'epoch': epoch,
+                'args': args,
+                'val_loss': val_loss,
+                'val_pck': val_pck,
+                'best_val_loss': best_val_loss,
+                'best_pck': best_pck,
+                'epochs_without_improvement': epochs_without_improvement,
+                'rng_state': torch.get_rng_state(),
+                'np_rng_state': np.random.get_state(),
+                'py_rng_state': random.getstate(),
+            }
+            if torch.cuda.is_available():
+                best_pck_dict['cuda_rng_state'] = torch.cuda.get_rng_state_all()
+            
+            torch.save(best_pck_dict, best_pck_path)
+            print(f"  ✓ Saved BEST PCK model (PCK: {val_pck:.4f}, val_loss: {val_loss:.4f})")
+        
+        # Report progress (early stopping based on PCK)
+        if not pck_improved:
+            # No improvement in PCK (pose accuracy)
+            epochs_without_improvement += 1
+            print(f"  → No improvement in PCK for {epochs_without_improvement} epoch(s)")
+            print(f"     Best PCK:  {best_pck:.4f} | Current: {val_pck:.4f}")
+            print(f"     Best loss: {best_val_loss:.4f} | Current: {val_loss:.4f}")
+            
+            # Check early stopping (based on PCK for pose estimation)
+            if args.early_stopping_patience > 0 and epochs_without_improvement >= args.early_stopping_patience:
+                print(f"\n{'!' * 80}")
+                print(f"Early stopping triggered!")
+                print(f"No improvement in PCK for {args.early_stopping_patience} epochs.")
+                print(f"Best PCK: {best_pck:.4f} (epoch {epoch - epochs_without_improvement + 1})")
+                print(f"Best validation loss: {best_val_loss:.4f}")
+                print(f"{'!' * 80}\n")
+                early_stop_triggered = True
+                break  # Exit training loop
 
+    # Training complete (either finished all epochs or early stopped)
     print("\n" + "=" * 80)
-    print("Training Complete!")
+    if early_stop_triggered:
+        print("Training Stopped Early!")
+        print(f"Stopped at epoch {epoch + 1}/{args.epochs}")
+    else:
+        print("Training Complete!")
+        print(f"Completed all {args.epochs} epochs")
     print("=" * 80)
     print(f"Best validation loss: {best_val_loss:.4f}")
+    print(f"Best PCK:            {best_pck:.4f}")
     print(f"Checkpoints saved to: {args.output_dir}")
+    print(f"\nLook for:")
+    print(f"  - checkpoint_best_loss_*.pth  (lowest validation loss)")
+    print(f"  - checkpoint_best_pck_*.pth   (highest PCK metric)")
+    if early_stop_triggered:
+        print(f"\nEarly stopping saved {args.epochs - epoch - 1} epochs of compute time!")
+    print("=" * 80)
 
 
 if __name__ == '__main__':
