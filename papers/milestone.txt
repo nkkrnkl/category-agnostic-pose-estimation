@@ -1,0 +1,302 @@
+\documentclass[sigconf]{acmart}
+
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{hyperref}
+
+% Remove ACM copyright and conference info for class submission
+\settopmatter{printacmref=false}
+\renewcommand\footnotetextcopyrightpermission[1]{}
+\pagestyle{plain}
+
+\begin{document}
+
+\title{Category-Agnostic Pose Estimation on MP-100 Dataset Using Raster2Seq Framework}
+
+\author{Theodoros Chronopoulos}
+\affiliation{%
+  \institution{Cornell Tech}
+  \city{NYC, NY}
+  \country{USA}}
+\email{tc796@cornell.edu}
+
+\author{Pavlos Rousoglou}
+\affiliation{%
+  \institution{Cornell Tech}
+  \city{NYC, NY}
+  \country{USA}}
+\email{pr484@cornell.edu}
+
+\author{Niki Karanikola}
+\affiliation{%
+  \institution{Cornell Tech}
+  \city{NYC, NY}
+  \country{USA}}
+\email{nk699@cornell.edu}
+
+\maketitle
+
+\section{Problem Statement and Related Work}
+
+The purpose of this project is to investigate the problem of category-agnostic pose estimation. In traditional 2D pose-estimation models, training is usually done on a single object category (e.g., humans, specific animals, cars, furniture, etc.). These models work well for the categories they were trained on, but they do not tend to generalize to new, unseen object categories without retraining.
+
+Category-agnostic pose estimation (CAPE) tries to solve this limitation. The goal in CAPE is to predict the 2D keypoints of objects that the model has never seen before, using only a very small amount of information that defines the pose for that new category. Specifically, given a query image (the image whose keypoints we want to predict) and a pose definition (which keypoints exist, how they connect, and their rough geometric layout), the model should output the 2D locations of those keypoints in the query image, even if the model never saw that category during training.
+
+Our investigation is based on three main papers:
+
+\begin{enumerate}
+    \item \textbf{Pose for Everything: Towards Category-Agnostic Pose Estimation (POMNet)} \\
+    This paper introduces the MP-100 dataset (which we use in our project) and proposes the original CAPE setup. The model is given a support image with labeled keypoints from an unseen category and must transfer that pose information to a query image from the same unseen category by predicting the image’s keypoints.
+
+    \item \textbf{CapeX: Category-Agnostic Pose Estimation from Textual Point Explanation} \\
+    CapeX extends the original CAPE idea by removing the need for a support image. Instead, it uses textual descriptions of keypoints and the skeleton graph to guide pose prediction on the query image. By replacing labeled images with text and a graph structure, the paper shows that pose estimation can be performed using a more abstract representation (i.e. text instead of labelled keypoints).
+
+    \item \textbf{Raster2Seq: Polygon Sequence Generation for Floorplan Reconstruction} \\
+    Although not directly related to CAPE, this paper introduces an autoregressive sequence model that converts floorplan images into sequences of polygon vertices. It shows that structured 2D geometric sequences can be generated token-by-token from an image.
+\end{enumerate}
+
+Our aim in this project is to combine the ideas discussed in these papers and study CAPE on the MP-100 dataset. However, instead of using labeled support images (as in POMNet) or textual descriptions (as in CapeX), our goal is to adapt the Raster2Seq autoregressive framework so that the model takes a support pose graph (represented as 2D coordinates and edges) and a query image, and then predicts the keypoints for that query image. In summary, we want to understand whether a geometric, sequence-based representation of the pose graph is enough to achieve CAPE performance comparable to the existing methods so far.
+
+\section{Problem Formulation}
+In this project, we aim to study the problem of category-agnostic pose estimation (CAPE), where the task is to predict the 2D keypoint locations for objects belonging to categories that the model wasn’t trained on. Unlike traditional pose-estimation approaches, where a separate model is trained for each category (human pose, animal pose, furniture pose, etc.), CAPE requires a single model that can generalize across many different object categories without retraining.
+The challenge is that, despite the differences in keypoints and skeletal structures across categories, the model must still infer the correct pose for a new category using only the pose definition provided at inference time.
+
+Formally, let $C_{\text{seen}}$ be the set of categories used during training and $C_{\text{unseen}}$ be the categories the model only encounters during inference. For each category $c$, we are given:
+
+\begin{itemize}
+    \item A pose graph $G_c = (V_c, E_c)$, where:
+    \begin{itemize}
+        \item $V_c$ is the set of keypoints, and
+        \item $E_c$ is the set of edges (the skeletal connections) between them.
+    \end{itemize}
+
+    \item A set of query images $I_q$, each depicting an object from category $c$.
+
+    \item The corresponding ground-truth 2D keypoint coordinates:
+    \[
+        K_q = \{(x_i, y_i)\}_i,\quad i = 1,\ldots, |V_c|.
+    \]
+\end{itemize}
+
+At inference time, we give the model:
+
+\begin{itemize}
+    \item The pose graph $G_c$ for an unseen category $c \in C_{\text{unseen}}$, represented as a sequence of 2D template coordinates and their skeletal edges, and
+
+    \item A query image $I_q$ for that unseen category.
+\end{itemize}
+
+The model must then produce a set of predicted keypoints:
+\[
+    \hat{K}_q = \{(\hat{x}_i, \hat{y}_i)\}_i,\quad i = 1,\ldots, |V_c|,
+\]
+that correspond to the object in the query image $I_q$. The challeng is that the model has never seen category $c$ during training and the only information it has about the new category is the abstract pose definition $G_c$ at test time.
+
+\section{Dataset}
+
+We use the MP-100 dataset introduced in the paper Pose for Everything. MP-100 contains 20,000 images across 100 object categories, including animals, vehicles, furniture, tools, and clothing. Each category has its own:
+
+\begin{itemize}
+    \item Number of keypoints (roughly 8--20)
+    \item Skeletal structure describing how those keypoints connect
+    \item A variety of images with different structural variations (rotated, bent, folded, etc.) and visual differences (textures, lighting, shape, etc.)
+\end{itemize}
+
+The dataset is pre-divided into five training/validation/testing splits. In each split, about 70\% of the categories serve as the seen categories for training, while the remaining categories serve as unseen for evaluation. It’s important to note that we were only able to collect 86 out of the 100 categories that make up the full MP-100 dataset. Specifically, we successfully recovered all categories except for 13 clothing categories from DeepFashion2 and the human hand category from the OneHand10K dataset.
+Even though we didn’t manage to reconstruct MP-100 completely, we still follow the same predefined splits as the original paper. This allows us to maintain the closest possible comparison with prior work such as POMNet and CapeX.
+
+
+\section{Evaluation Metric}
+
+We evaluate our model using the Probability of Correct Keypoint (PCK) metric. PCK is the standard metric for category-agnostic pose estimation, and it measures the proportion of predicted keypoints that fall within a small, normalized distance from their corresponding ground-truth locations.
+
+A predicted keypoint $\hat{k}_i$ is considered correct if:
+
+\[
+    \frac{1}{N} \sum_{i=1}^{n}
+    \frac{\lVert \hat{k}_i - k_i \rVert_2}{D_{\text{norm}}}
+    < \alpha
+\]
+
+Where:
+
+\begin{itemize}
+    \item $k_i$ is the ground-truth coordinate of keypoint i,
+    \item $d_{\text{norm}}$ the normalization factor,
+    \item $\alpha$ is a fixed threshold (e.g., 0.05),
+    \item $I$ the indicator function
+\end{itemize}
+
+PCK represents the percentage of correctly predicted key points across all images and categories in the test set. Similarly to CapeX and Pose For Everything, the normalization factor is the bounding box size. By using the same exact metric we can directly benchmark our method against already existing approaches.
+
+
+\section{Method}
+
+\subsection{Raster2Seq Architecture}
+Our method follows the Raster2Seq framework with the following components:
+
+\textbf{1. Visual Encoder:} We use a ResNet-50 backbone pretrained on ImageNet to extract visual features from the input image. The encoder produces a feature map $F \in \mathbb{R}^{C \times H' \times W'}$ where $H' = H/32$ and $W' = W/32$ for a ResNet-50.
+
+\textbf{2. Transformer Decoder:} The core of Raster2Seq is a transformer decoder that generates keypoint sequences autoregressively. The decoder uses:
+\begin{itemize}
+    \item Multi-head self-attention to model dependencies between keypoints
+    \item Cross-attention to attend to relevant image features
+    \item Deformable attention mechanisms for efficient feature sampling
+    \item 6 decoder layers with 8 attention heads each
+\end{itemize}
+
+\textbf{3. Coordinate Tokenization:} Continuous coordinates $(x, y) \in [0, W] \times [0, H]$ are discretized into tokens using bilinear interpolation over a learned coordinate embedding space. This allows the model to predict coordinates as discrete tokens rather than continuous regression targets.
+
+\textbf{4. Sequence Format:} For an object with $N$ keypoints, the output sequence has the format:
+$$[\text{<}coord\text{>}, x_1, y_1, \text{<}sep\text{>}, \text{<}coord\text{>}, x_2, y_2, \text{<}sep\text{>}, \ldots, \text{<}eos\text{>}]$$
+where $\text{<}coord\text{>}$ indicates a keypoint token, $\text{<}sep\text{>}$ separates keypoints, and $\text{<}eos\text{>}$ marks sequence end.
+
+\subsection{Loss Function}
+The model is trained with a multi-task loss:
+$$\mathcal{L} = \lambda_1 \mathcal{L}_{ce} + \lambda_2 \mathcal{L}_{coord}$$
+
+where:
+\begin{itemize}
+    \item $\mathcal{L}_{ce}$ is the cross-entropy loss for token classification (predicting keypoint types and special tokens)
+    \item $\mathcal{L}_{coord}$ is the L1 loss for coordinate prediction
+    \item $\lambda_1 = 1.0$ and $\lambda_2 = 5.0$ are loss weights
+\end{itemize}
+
+The model also employs auxiliary losses from intermediate decoder layers to improve training stability.
+
+\section{Preliminary Results}
+
+After adapting the Raster2Seq framework to the category pose estimation problem using the MP-100, we trained a tiny version of the model with 5 epochs for our preliminary results using NVIDIA A100 GPUs. 
+
+\begin{table}[H]
+\centering
+\begin{tabular}{l r}
+\hline
+\textbf{Parameter} & \textbf{Value} \\
+\hline\hline
+Mode & tiny \\
+Total Epochs & 5 \\
+Batch Size & 8 \\
+Learning Rate & 0.0001 \\
+Backbone Model & resnet50 \\
+Train Samples & 11,665 \\
+Validation Samples & 1,241 \\
+Device & cuda\_0 \\
+Seed & 42 \\
+\hline
+\end{tabular}
+\caption{Training Run Hyperparameters excluding the DeepFashion2 categories.}
+\label{tab:hyperparameters}
+\end{table}
+
+We can observe in Figure 1 that the training loss consistently decreased over the 5 epochs, whereas the validation loss plateaued after epoch 2. This difference between training and validation could be an early sign of overfitting. However, we need to train the full model on 300 epochs to draw this conclusion.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\linewidth]{Code_Generated_Image.png}
+    \caption{Train and validation losses per epoch}
+    \label{fig:placeholder}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\linewidth]{Code_Generated_Image (1).png}
+    \caption{Component-Level Losses per epoch}
+    \label{fig:placeholder}
+\end{figure}
+
+In Figure 2, we can see that the overfitting could be driven by the Validation Class Loss, which peaked after epoch 4. However, it's still too early to make this assumption.
+
+The Mean PCK peaked at epoch 4 (0.5980) before dropping at epoch 5 (0.5506). Interestingly, the highest PCK@0.2 score was recorded at epoch 2 (0.8605). So far, our model is correctly learning to find the appropriate area of the keypoints.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{l r r}
+\hline
+\textbf{Epoch} & \textbf{PCK@0.2} & \textbf{Mean PCK} \\
+\hline\hline
+1 & 0.8306 & 0.5273 \\
+2 & 0.8605 & 0.5858 \\
+3 & 0.8392 & 0.5725 \\
+4 & 0.8531 & 0.5980 \\
+5 & 0.8197 & 0.5506 \\
+\hline
+\end{tabular}
+\caption{Validation PCK Metrics per Epoch.}
+\label{tab:pck_metrics}
+\end{table}
+
+\section{Next Steps}
+
+Our preliminary results show the potential of our model, but it's too early to form an well-rounded opinion on its performance. By December first, we plan to:
+
+\begin{enumerate}
+    
+    \item \textbf{Collect Full Dataset:} We hope to hear back from the DeepFashion2 dataset's stakeholders, so that our final model is benchmarked against the complete MP-100 dataset.
+
+    \item \textbf{Train full model:} We will train the model on 300 epochs and monitor convergence. This will help us identify the best performing model.
+    
+    \item \textbf{Model evaluation:} 
+    \begin{itemize}
+        \item We will compare our final PCK results against the MP-100 benchmark baselines.
+    \end{itemize}
+\end{enumerate}
+
+\section{Conclusion}
+
+We have made substantial progress toward adapting the Raster2Seq framework for category-agnostic pose estimation on the MP-100 dataset. We will use this work and build upon it to improve the model performance by December 1st. This work will provide insights into the effectiveness of the Raster2Seq approaches for category-agnostic pose estimation.
+
+\begin{acks}
+We gratefully acknowledge the author of Raster2Seq for releasing their code. Our approach builds upon CapeX for the category pose estimation and draws inspiration from Raster2Seq for the architecture design.
+\end{acks}
+
+% \bibliographystyle{ACM-Reference-Format}
+
+% \bibliography{sample-base}
+\begin{thebibliography}{9}
+
+\bibitem{mmpose}
+M. Contributors.
+\newblock {Openmmlab pose estimation toolbox and benchmark}.
+\newblock \url{https://github.com/open-mmlab/mmpose}, 2020.
+
+\bibitem{hirschorn2024edge}
+O. Hirschorn and S. Avidan.
+\newblock {Edge weight prediction for category-agnostic pose estimation}.
+\newblock {\em arXiv preprint arXiv:2411.16665}, 2024.
+
+\bibitem{jiang2023rtmpose}
+T. Jiang, P. Lu, L. Zhang, N. Ma, R. Han, C. Lyu, Y. Li, and K. Chen.
+\newblock {RTMPose: Real-time multi-person pose estimation based on MMPose}.
+\newblock {\em arXiv preprint arXiv:2303.07399}, 2023.
+
+\bibitem{maji2022yolopose}
+D. Maji, S. Nagori, M. Mathew, and D. Poddar.
+\newblock {YOLO-Pose: Enhancing YOLO for multi person pose estimation using object keypoint similarity loss}.
+\newblock In {\em Proceedings of the IEEE/CVF conference on computer vision and pattern recognition}, pages 2637–2646, 2022.
+
+\bibitem{rusanovsky2024capex}
+M. Rusanovsky, O. Hirschorn, and S. Avidan.
+\newblock {CapeX: Category-agnostic pose estimation from textual point explanation}.
+\newblock {\em arXiv preprint arXiv:2406.00384}, 2024.
+
+\bibitem{song2019apollocar3d}
+X. Song, P. Wang, D. Zhou, R. Zhu, C. Guan, Y. Dai, H. Su, H. Li, and R. Yang.
+\newblock {ApolloCar3D: A large 3d car instance understanding benchmark for autonomous driving}.
+\newblock In {\em Proceedings of the IEEE/CVF conference on computer vision and pattern recognition}, pages 5452–5462, 2019.
+
+\bibitem{xu2022pose}
+L. Xu, S. Jin, W. Zeng, W. Liu, C. Qian, W. Ouyang, P. Luo, and X. Wang.
+\newblock {Pose for everything: Towards category-agnostic pose estimation}.
+\newblock In {\em European conference on computer vision}, pages 398–416. Springer, 2022.
+
+\bibitem{yu2021ap10k}
+H. Yu, Y. Xu, J. Zhang, W. Zhao, Z. Guan, and D. Tao.
+\newblock {AP-10K: A benchmark for animal pose estimation in the wild}.
+\newblock {\em arXiv preprint arXiv:2108.12617}, 2021.
+
+\end{thebibliography}
+
+
+\end{document}
+

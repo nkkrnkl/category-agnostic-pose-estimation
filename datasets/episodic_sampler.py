@@ -192,10 +192,12 @@ class EpisodicDataset(data.Dataset):
                 # Extract support pose graph (normalized coordinates)
                 support_coords = torch.tensor(support_data['keypoints'], dtype=torch.float32)
 
-                # Normalize support coordinates to [0, 1]
+                # Normalize support coordinates to [0, 1] using bbox dimensions
+                # Note: After mp100_cape.py modifications, keypoints are already bbox-relative
+                # and height/width are the dimensions AFTER transform (512x512)
                 h, w = support_data['height'], support_data['width']
-                support_coords[:, 0] /= w  # x
-                support_coords[:, 1] /= h  # y
+                support_coords[:, 0] /= w  # x normalized by width
+                support_coords[:, 1] /= h  # y normalized by height
 
                 # Create support mask (all valid for now)
                 support_mask = torch.ones(len(support_coords), dtype=torch.bool)
@@ -217,7 +219,11 @@ class EpisodicDataset(data.Dataset):
                         'height': query_data['height'],
                         'width': query_data['width'],
                         'keypoints': query_data['keypoints'],
-                        'num_keypoints': query_data['num_keypoints']
+                        'num_keypoints': query_data['num_keypoints'],
+                        'bbox': query_data.get('bbox', [0, 0, query_data['width'], query_data['height']]),
+                        'bbox_width': query_data.get('bbox_width', query_data['width']),
+                        'bbox_height': query_data.get('bbox_height', query_data['height']),
+                        'visibility': query_data.get('visibility', [1] * query_data['num_keypoints'])
                     })
 
                 # Successfully loaded all images - return the episode
@@ -226,6 +232,9 @@ class EpisodicDataset(data.Dataset):
                     'support_coords': support_coords,
                     'support_mask': support_mask,
                     'support_skeleton': support_skeleton,
+                    'support_bbox': support_data.get('bbox', [0, 0, support_data['width'], support_data['height']]),
+                    'support_bbox_width': support_data.get('bbox_width', support_data['width']),
+                    'support_bbox_height': support_data.get('bbox_height', support_data['height']),
                     'query_images': query_images,
                     'query_targets': query_targets,
                     'query_metadata': query_metadata,

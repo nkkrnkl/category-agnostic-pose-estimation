@@ -151,12 +151,13 @@ class MP100CAPE(torch.utils.data.Dataset):
         """
         Returns:
             dict with keys:
-                - image: query image tensor
-                - keypoints: list of keypoint coordinates [[x1,y1], [x2,y2], ...]
+                - image: query image tensor (cropped to bbox, resized to 512x512)
+                - keypoints: list of keypoint coordinates [[x1,y1], [x2,y2], ...] (relative to bbox)
                 - category_id: object category
                 - num_keypoints: number of keypoints
                 - image_id: image identifier
                 - file_name: image path
+                - bbox: bounding box [x, y, w, h]
                 - seq_data: tokenized keypoint sequence
         """
         coco = self.coco
@@ -182,50 +183,96 @@ class MP100CAPE(torch.utils.data.Dataset):
         if len(img.shape) >= 3:
             if img.shape[-1] > 3:  # drop alpha channel
                 img = img[:, :, :3]
-            h, w = img.shape[:2]
+            orig_h, orig_w = img.shape[:2]
         else:
-            h, w = img.shape
+            orig_h, orig_w = img.shape
 
         # Build record
         record = {}
         record["file_name"] = file_name
-        record["height"] = h
-        record["width"] = w
         record["image_id"] = img_id
 
-        # Process keypoints from annotations
+        # Process keypoints and bbox from annotations
         keypoints_list = []
         category_ids = []
         num_keypoints_list = []
+        bbox_list = []
+        visibility_list = []
 
         for ann in target:
             if 'keypoints' in ann and ann['keypoints']:
                 # COCO keypoints format: [x1,y1,v1,x2,y2,v2,...]
                 # where v is visibility (0=not labeled, 1=labeled but not visible, 2=labeled and visible)
                 kpts = np.array(ann['keypoints']).reshape(-1, 3)
+                
+                # Store visibility flags for all keypoints
+                visibility = kpts[:, 2]
 
-                # Filter visible keypoints (v > 0)
-                visible_kpts = kpts[kpts[:, 2] > 0][:, :2]  # only take x, y
+                # Filter visible keypoints (v > 0) - but keep track of all keypoint positions
+                visible_mask = kpts[:, 2] > 0
+                visible_kpts = kpts[visible_mask][:, :2]  # only take x, y
 
-                if len(visible_kpts) > 0:
-                    keypoints_list.append(visible_kpts.tolist())
+                if len(visible_kpts) > 0 and 'bbox' in ann:
+                    keypoints_list.append(kpts[:, :2].tolist())  # Store ALL keypoints (including non-visible)
+                    visibility_list.append(visibility.tolist())
                     category_ids.append(ann.get('category_id', 0))
                     num_keypoints_list.append(len(visible_kpts))
+                    bbox_list.append(ann['bbox'])
 
         # For now, take the first annotation (can be extended for multi-object)
         if len(keypoints_list) > 0:
-            record["keypoints"] = keypoints_list[0]
+            # Extract bbox [x, y, width, height]
+            bbox = bbox_list[0]
+            bbox_x, bbox_y, bbox_w, bbox_h = bbox
+            
+            # Ensure bbox is within image bounds
+            bbox_x = max(0, int(bbox_x))
+            bbox_y = max(0, int(bbox_y))
+            bbox_w = min(int(bbox_w), orig_w - bbox_x)
+            bbox_h = min(int(bbox_h), orig_h - bbox_y)
+            
+            # Crop image to bbox
+            img_cropped = img[bbox_y:bbox_y+bbox_h, bbox_x:bbox_x+bbox_w]
+            
+            # Adjust keypoints to be relative to bbox (subtract bbox offset)
+            kpts_array = np.array(keypoints_list[0])
+            kpts_array[:, 0] -= bbox_x  # x relative to bbox
+            kpts_array[:, 1] -= bbox_y  # y relative to bbox
+            
+            # Filter to only visible keypoints for storage
+            visibility = np.array(visibility_list[0])
+            visible_mask = visibility > 0
+            visible_kpts = kpts_array[visible_mask].tolist()
+            
+            record["keypoints"] = visible_kpts
+            record["visibility"] = visibility.tolist()
             record["category_id"] = category_ids[0]
             record["num_keypoints"] = num_keypoints_list[0]
+            record["bbox"] = [bbox_x, bbox_y, bbox_w, bbox_h]
+            
+            # Store bbox dimensions for normalization
+            record["bbox_width"] = bbox_w
+            record["bbox_height"] = bbox_h
+            
+            # Use cropped image
+            img = img_cropped
+            record["height"] = bbox_h
+            record["width"] = bbox_w
 
             # Get skeleton edges for this category
             record["skeleton"] = self._get_skeleton_for_category(category_ids[0])
         else:
             # Empty annotation - use dummy values
             record["keypoints"] = [[0.0, 0.0]]
+            record["visibility"] = [1]
             record["category_id"] = 0
             record["num_keypoints"] = 1
             record["skeleton"] = []
+            record["bbox"] = [0, 0, orig_w, orig_h]
+            record["bbox_width"] = orig_w
+            record["bbox_height"] = orig_h
+            record["height"] = orig_h
+            record["width"] = orig_w
 
         # Apply transforms
         if self._transforms is not None:
@@ -437,10 +484,11 @@ def build_mp100_cape(image_set, args):
         raise FileNotFoundError(f"Annotation file not found: {ann_file}")
 
     # Build transforms
+    # Images are already cropped to bbox, now resize to 512x512
     if image_set == 'train':
-        transforms = Resize((256, 256))  # Simple resize for now
+        transforms = Resize((512, 512))
     else:
-        transforms = Resize((256, 256))
+        transforms = Resize((512, 512))
 
     dataset = MP100CAPE(
         img_folder=str(root),
