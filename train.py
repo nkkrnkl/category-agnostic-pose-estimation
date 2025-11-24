@@ -96,19 +96,20 @@ def train_epoch(model, dataloader, optimizer, device, config, logger, epoch):
     num_batches = 0
 
     for batch_idx, batch in enumerate(dataloader):
-        # Move batch to device
-        support_images = batch['support_images'].to(device)
-        support_coords = batch['support_coords'].to(device)
-        support_visibility = batch['support_visibility'].to(device)
-        query_images = batch['query_images'].to(device)
-        query_coords = batch['query_coords'].to(device)
-        query_visibility = batch['query_visibility'].to(device)
-        num_keypoints = batch['num_keypoints'].to(device)
+        # Move batch to device (use non_blocking for faster transfer when using CUDA)
+        non_blocking = (device.type == 'cuda')
+        support_images = batch['support_images'].to(device, non_blocking=non_blocking)
+        support_coords = batch['support_coords'].to(device, non_blocking=non_blocking)
+        support_visibility = batch['support_visibility'].to(device, non_blocking=non_blocking)
+        query_images = batch['query_images'].to(device, non_blocking=non_blocking)
+        query_coords = batch['query_coords'].to(device, non_blocking=non_blocking)
+        query_visibility = batch['query_visibility'].to(device, non_blocking=non_blocking)
+        num_keypoints = batch['num_keypoints'].to(device, non_blocking=non_blocking)
 
         B, T_max = support_coords.shape[:2]
 
         # Create keypoint mask
-        keypoint_mask = create_keypoint_mask(num_keypoints, T_max).to(device)
+        keypoint_mask = create_keypoint_mask(num_keypoints, T_max).to(device, non_blocking=non_blocking)
 
         # Forward pass with teacher forcing
         outputs = model(
@@ -199,12 +200,20 @@ def main():
 
     # Create episodic dataloader
     print("\nCreating episodic dataloader...")
+    # Use num_workers from config if available, otherwise use 0 for CPU or 4+ for CUDA
+    num_workers = config.get('num_workers', 0)
+    if device.type == 'cuda' and num_workers == 0:
+        # Default to 4 workers for CUDA to enable parallel data loading
+        num_workers = 4
+        print(f"Using {num_workers} workers for data loading (CUDA detected)")
+    
     train_loader = create_episodic_dataloader(
         dataset=train_dataset,
         batch_size=config['training']['batch_size'],
         num_episodes=config['training']['num_episodes_per_epoch'],
         shuffle=True,
-        num_workers=0  # Set to 0 to avoid multiprocessing issues
+        num_workers=num_workers,
+        pin_memory=(device.type == 'cuda')  # Pin memory for faster GPU transfer
     )
 
     # Create model

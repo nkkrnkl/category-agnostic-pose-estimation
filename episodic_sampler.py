@@ -170,7 +170,7 @@ def collate_episodes(batch):
     }
 
 
-def create_episodic_dataloader(dataset, batch_size, num_episodes, shuffle=True, num_workers=0):
+def create_episodic_dataloader(dataset, batch_size, num_episodes, shuffle=True, num_workers=0, pin_memory=False):
     """
     Create a DataLoader with episodic sampling.
 
@@ -179,7 +179,8 @@ def create_episodic_dataloader(dataset, batch_size, num_episodes, shuffle=True, 
         batch_size: number of episodes per batch
         num_episodes: total number of episodes per epoch
         shuffle: whether to shuffle
-        num_workers: number of worker processes
+        num_workers: number of worker processes (0 = single-threaded, >0 = multi-process)
+        pin_memory: if True, pin memory for faster GPU transfer (use with CUDA)
 
     Returns:
         DataLoader that yields episodic batches
@@ -251,6 +252,7 @@ def create_episodic_dataloader(dataset, batch_size, num_episodes, shuffle=True, 
         batch_size=1,  # Each "item" is already a batch of episodes
         shuffle=False,  # Shuffling is handled by the sampler
         num_workers=num_workers,
+        pin_memory=pin_memory,  # Pin memory for faster GPU transfer when using CUDA
         collate_fn=lambda x: batch_loader(x[0])  # x[0] because batch_size=1
     )
 
