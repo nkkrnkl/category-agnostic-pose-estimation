@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
+from torch.cuda.amp import autocast, GradScaler
 import yaml
 
 from dataset import MP100Dataset
@@ -61,6 +62,12 @@ def create_model(config, device):
     )
 
     model = model.to(device)
+    
+    # Compile model for faster training (PyTorch 2.0+)
+    if hasattr(torch, 'compile') and device.type == 'cuda':
+        print("Compiling model with torch.compile for faster training...")
+        model = torch.compile(model, mode='reduce-overhead')
+        print("✓ Model compiled successfully")
 
     return model
 
@@ -84,12 +91,15 @@ def create_optimizer(model, config):
     return optimizer, scheduler
 
 
-def train_epoch(model, dataloader, optimizer, device, config, logger, epoch):
+def train_epoch(model, dataloader, optimizer, device, config, logger, epoch, scaler=None):
     """Train for one epoch."""
     model.train()
 
     training_config = config['training']
     coord_loss_weight = training_config['coord_loss_weight']
+    
+    # Use mixed precision if CUDA is available and scaler is provided
+    use_amp = (device.type == 'cuda' and scaler is not None)
 
     total_loss = 0
     total_coord_loss = 0
@@ -111,36 +121,65 @@ def train_epoch(model, dataloader, optimizer, device, config, logger, epoch):
         # Create keypoint mask
         keypoint_mask = create_keypoint_mask(num_keypoints, T_max).to(device, non_blocking=non_blocking)
 
-        # Forward pass with teacher forcing
-        outputs = model(
-            query_images=query_images,
-            support_coords=support_coords,
-            target_coords=query_coords,
-            num_keypoints=num_keypoints,
-            keypoint_mask=keypoint_mask,
-            teacher_forcing=True
-        )
-
-        # Compute loss
-        loss_dict = model.compute_loss(
-            outputs=outputs,
-            target_coords=query_coords,
-            visibility=query_visibility,
-            num_keypoints=num_keypoints,
-            coord_loss_weight=coord_loss_weight
-        )
-
-        loss = loss_dict['total_loss']
-        coord_loss = loss_dict['coord_loss']
-
-        # Backward pass
+        # Forward pass with teacher forcing (using mixed precision if enabled)
         optimizer.zero_grad()
-        loss.backward()
-
-        # Gradient clipping
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-
-        optimizer.step()
+        
+        if use_amp:
+            with autocast():
+                outputs = model(
+                    query_images=query_images,
+                    support_coords=support_coords,
+                    target_coords=query_coords,
+                    num_keypoints=num_keypoints,
+                    keypoint_mask=keypoint_mask,
+                    teacher_forcing=True
+                )
+                
+                # Compute loss
+                loss_dict = model.compute_loss(
+                    outputs=outputs,
+                    target_coords=query_coords,
+                    visibility=query_visibility,
+                    num_keypoints=num_keypoints,
+                    coord_loss_weight=coord_loss_weight
+                )
+                
+                loss = loss_dict['total_loss']
+                coord_loss = loss_dict['coord_loss']
+            
+            # Backward pass with mixed precision
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            # Standard precision training
+            outputs = model(
+                query_images=query_images,
+                support_coords=support_coords,
+                target_coords=query_coords,
+                num_keypoints=num_keypoints,
+                keypoint_mask=keypoint_mask,
+                teacher_forcing=True
+            )
+            
+            # Compute loss
+            loss_dict = model.compute_loss(
+                outputs=outputs,
+                target_coords=query_coords,
+                visibility=query_visibility,
+                num_keypoints=num_keypoints,
+                coord_loss_weight=coord_loss_weight
+            )
+            
+            loss = loss_dict['total_loss']
+            coord_loss = loss_dict['coord_loss']
+            
+            # Backward pass
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
 
         # Logging
         total_loss += loss.item()
@@ -223,6 +262,12 @@ def main():
 
     # Create optimizer
     optimizer, scheduler = create_optimizer(model, config)
+    
+    # Create GradScaler for mixed precision training (CUDA only)
+    scaler = None
+    if device.type == 'cuda':
+        scaler = GradScaler()
+        print("✓ Mixed precision training enabled (FP16)")
 
     # Logger
     logger = MetricLogger(
@@ -250,7 +295,8 @@ def main():
             device=device,
             config=config,
             logger=logger,
-            epoch=epoch
+            epoch=epoch,
+            scaler=scaler
         )
 
         # Log epoch metrics

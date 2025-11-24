@@ -20,7 +20,7 @@ model:
 
 # Training hyperparameters
 training:
-  batch_size: 4
+  batch_size: 16  # Increased from 4 for better GPU utilization
   num_epochs: 300
   num_epochs_preliminary: 5  # For quick testing
   num_episodes_per_epoch: 10000
