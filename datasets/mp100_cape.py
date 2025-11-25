@@ -869,7 +869,6 @@ def build_mp100_cape(image_set, args):
             # Helps model be robust to sensor noise and compression artifacts
             A.GaussNoise(
                 var_limit=(5.0, 25.0),  # Low variance to avoid corrupting image
-                mean=0,                   # Zero-mean noise
                 p=0.4                     # Apply 40% of the time
             ),
             

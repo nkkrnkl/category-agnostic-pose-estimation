@@ -437,10 +437,38 @@ def main(args):
         
         # Normalize the path (remove leading/trailing slashes, handle bucket prefix)
         image_path = args.debug_single_image_path.strip()
+        
+        # Normalize paths for comparison (handle different separators)
+        dataset_root_normalized = os.path.normpath(args.dataset_root)
+        data_folder = os.path.normpath(os.path.join(dataset_root_normalized, 'data'))
+        image_path_normalized = os.path.normpath(image_path)
+        
+        # If path is a full path that includes dataset_root/data/, extract relative path
+        if image_path_normalized.startswith(data_folder + os.sep) or image_path_normalized == data_folder:
+            # Extract relative path from data folder
+            image_path = os.path.relpath(image_path_normalized, data_folder)
+        # If path starts with dataset_root but not data/, try to find data/ in path
+        elif image_path_normalized.startswith(dataset_root_normalized + os.sep):
+            # Get relative path from dataset root
+            relative_to_root = os.path.relpath(image_path_normalized, dataset_root_normalized)
+            # If it starts with 'data/', remove that prefix
+            if relative_to_root.startswith('data' + os.sep):
+                image_path = relative_to_root[len('data' + os.sep):]
+            elif relative_to_root == 'data':
+                # Edge case: path points to data folder itself
+                raise ValueError(f"Path points to data folder, not an image: {args.debug_single_image_path}")
+            else:
+                image_path = relative_to_root
+        # If it's already a relative path, use as-is (but normalize separators)
+        else:
+            image_path = image_path_normalized
+        
         # Remove bucket prefix if present
         if image_path.startswith('dl-category-agnostic-pose-mp100-data/'):
             image_path = image_path.replace('dl-category-agnostic-pose-mp100-data/', '')
-        image_path = image_path.lstrip('/')
+        
+        # Normalize to forward slashes for consistency (COCO annotations use forward slashes)
+        image_path = image_path.replace(os.sep, '/').lstrip('/')
         
         # Find the dataset index that matches this file path
         found_idx = None
