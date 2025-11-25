@@ -231,7 +231,11 @@ def setup_cuda_optimizations(args, device):
     scaler = None
     if args.use_amp and device.type == 'cuda':
         try:
-            scaler = torch.cuda.amp.GradScaler()
+            # Use new API to avoid deprecation warning
+            if hasattr(torch.amp, 'GradScaler'):
+                scaler = torch.amp.GradScaler('cuda')
+            else:
+                scaler = torch.cuda.amp.GradScaler()
             print("✓ Mixed precision training (AMP) enabled")
             print("  → Expected speedup: ~2x on modern GPUs")
         except Exception as e:
@@ -462,7 +466,7 @@ def main(args):
         print("=" * 80 + "\n")
         
         # Override episodes_per_epoch for fast overfitting
-        args.episodes_per_epoch = min(args.episodes_per_episode, 50)  # Limit episodes for single image
+        args.episodes_per_epoch = min(args.episodes_per_epoch, 50)  # Limit episodes for single image
 
     train_loader = build_episodic_dataloader(
         base_dataset=train_dataset,
