@@ -265,7 +265,11 @@ def main(args):
     
     # Verify model is on correct device
     model_device = next(model.parameters()).device
-    if model_device != device:
+    # Compare device types (mps == mps:0, cuda == cuda:0, etc.)
+    device_type_matches = (
+        str(model_device).split(':')[0] == str(device).split(':')[0]
+    )
+    if not device_type_matches:
         print(f"⚠️  Warning: Model device ({model_device}) doesn't match expected device ({device})")
     else:
         print(f"✓ Model moved to device: {model_device}")
@@ -516,21 +520,62 @@ def main(args):
             device=device
         )
 
-        # Print epoch summary
+        # ========================================================================
+        # Epoch Summary with Comparable Metrics
+        # ========================================================================
+        # Training uses auxiliary losses (deep supervision on all 6 decoder layers)
+        # Validation uses only final layer (forward_inference doesn't return aux)
+        # 
+        # We show BOTH:
+        #   - Total train loss (all layers) - actual optimization objective
+        #   - Final layer train loss - comparable to validation for overfitting detection
+        # ========================================================================
+        
+        # Extract final layer losses (without _0, _1, etc. suffixes)
+        train_loss_ce_final = train_stats.get('loss_ce', 0.0)
+        train_loss_coords_final = train_stats.get('loss_coords', 0.0)
+        train_loss_total = train_stats.get('loss', 0.0)
+        
+        # Compute final layer loss (unweighted sum for comparison)
+        # Note: This is the raw sum before weight_dict scaling
+        train_loss_final_layer = train_loss_ce_final + train_loss_coords_final
+        
+        # Validation losses
+        val_loss = val_stats.get('loss', 0.0)
+        val_loss_ce = val_stats.get('loss_ce', 0.0)
+        val_loss_coords = val_stats.get('loss_coords', 0.0)
+        val_pck = val_stats.get('pck', 0.0)
+        val_pck_mean = val_stats.get('pck_mean_categories', 0.0)
+        
         print(f"\n{'=' * 80}")
         print(f"Epoch {epoch + 1} Summary:")
         print(f"{'=' * 80}")
-        print(f"  Train Loss:       {train_stats.get('loss', 0):.4f}")
-        print(f"    - Class Loss:   {train_stats.get('loss_ce', 0):.4f}")
-        print(f"    - Coords Loss:  {train_stats.get('loss_coords', 0):.4f}")
+        print(f"  Train Loss (all layers):    {train_loss_total:.4f}")
+        print(f"  Train Loss (final layer):   {train_loss_final_layer:.4f}")
+        print(f"    - Class Loss:             {train_loss_ce_final:.4f}")
+        print(f"    - Coords Loss:            {train_loss_coords_final:.4f}")
+        print(f"")
+        print(f"  Val Loss (final layer):     {val_loss:.4f}")
+        print(f"    - Class Loss:             {val_loss_ce:.4f}")
+        print(f"    - Coords Loss:            {val_loss_coords:.4f}")
+        print(f"")
+        print(f"  Val PCK@0.2:                {val_pck:.2%}")
+        print(f"    - Mean PCK (categories):  {val_pck_mean:.2%}")
+        print(f"")
         
-        # Validation uses autoregressive inference (no loss, only PCK)
-        val_pck = val_stats.get('pck', 0.0)
-        val_pck_mean = val_stats.get('pck_mean_categories', 0.0)
-        print(f"  Val PCK@0.2:      {val_pck:.2%} (autoregressive)")
-        print(f"    - Mean PCK:     {val_pck_mean:.2%} (across categories)")
+        # Overfitting detection (compare final layers only - apples to apples)
+        if val_loss > 0 and train_loss_final_layer > 0:
+            loss_ratio = val_loss / train_loss_final_layer
+            if loss_ratio > 1.5:
+                print(f"  🛑 OVERFITTING ALERT:  Val/Train = {loss_ratio:.2f}x (val >> train)")
+            elif loss_ratio > 1.2:
+                print(f"  ⚠️  Overfitting watch:  Val/Train = {loss_ratio:.2f}x (val > train)")
+            elif loss_ratio > 0.8:
+                print(f"  ✅ Generalization OK:  Val/Train = {loss_ratio:.2f}x (balanced)")
+            else:
+                print(f"  ℹ️  Val < Train:        Val/Train = {loss_ratio:.2f}x (early training)")
         
-        print(f"  Learning Rate:    {optimizer.param_groups[0]['lr']:.6f}")
+        print(f"  Learning Rate:              {optimizer.param_groups[0]['lr']:.6f}")
         print(f"{'=' * 80}\n")
 
         # ========================================================================

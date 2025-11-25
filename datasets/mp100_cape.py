@@ -754,6 +754,19 @@ class MP100CAPE(torch.utils.data.Dataset):
                 if visibility[kpt_idx] > 0:
                     visibility_mask[token_idx] = True
                 token_idx += 1
+        
+        # ========================================================================
+        # CRITICAL FIX: Include EOS token in visibility mask
+        # ========================================================================
+        # BUG: Previously EOS was excluded from loss (line 737 comment)
+        # IMPACT: Model never learned to predict EOS → always generates 200 tokens
+        # FIX: Mark EOS token as True so model receives gradient signal to learn
+        #      when to stop generation
+        # ========================================================================
+        for i, label in enumerate(token_labels):
+            if label == TokenType.eos.value:
+                visibility_mask[i] = True
+                break  # Only mark first EOS
 
         # Pad sequences
         target_seq = self.tokenizer._padding(target_seq, [0, 0], dtype=torch.float32)

@@ -574,6 +574,29 @@ class RoomFormerV2(nn.Module):
                 delta_y2[j].append(1 - delta_y)
             i += 1
         
+        # Debug logging for keypoint count diagnostic
+        if os.environ.get('DEBUG_KEYPOINT_COUNT', '0') == '1':
+            print(f"[DIAG roomformer_v2] Generation finished at step {i}/{max_len}")
+            print(f"  unfinish_flag: {unfinish_flag}")
+            print(f"  gen_out[0] length: {len(gen_out[0])}")
+            print(f"  output_cls_list length: {len(output_cls_list)}")
+            print(f"  output_reg_list length: {len(output_reg_list)}")
+        
+        # ========================================================================
+        # CRITICAL DIAGNOSTIC: Warn if generation reached max_len without EOS
+        # ========================================================================
+        # This indicates the model didn't learn to predict EOS properly.
+        # After fixing the EOS loss masking bug, this warning should not appear.
+        # ========================================================================
+        incomplete_generations = unfinish_flag.sum()
+        if incomplete_generations > 0 and os.environ.get('WARN_INCOMPLETE_GENERATION', '1') == '1':
+            import warnings
+            warnings.warn(
+                f"⚠️  {int(incomplete_generations)}/{bs} sequences reached max_len={max_len} "
+                f"without predicting EOS. This suggests the model hasn't learned proper "
+                f"stopping behavior. Consider retraining with EOS token included in loss."
+            )
+        
         # ========================================================================
         # CRITICAL FIX: Concatenate accumulated outputs to return FULL sequence
         # ========================================================================

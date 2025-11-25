@@ -452,6 +452,33 @@ def run_evaluation(model: nn.Module, dataloader: DataLoader, device: torch.devic
                     vis = meta.get('visibility', [])
                     num_kpts_for_category = len(vis)
                     
+                    # Debug logging for keypoint count diagnostic
+                    if os.environ.get('DEBUG_KEYPOINT_COUNT', '0') == '1' and idx == 0 and batch_idx == 0:
+                        print(f"[DIAG eval_cape] Trimmed keypoints:")
+                        print(f"  pred before: {pred_kpts[idx].shape}")
+                        print(f"  gt before: {gt_kpts[idx].shape}")
+                        print(f"  num_kpts_for_category: {num_kpts_for_category}")
+                        print(f"  Will trim to: [{num_kpts_for_category}, 2]")
+                    
+                    # ================================================================
+                    # CRITICAL ASSERTION: Detect keypoint count mismatch before trimming
+                    # ================================================================
+                    # If predictions significantly exceed expected count, the model
+                    # likely didn't learn to predict EOS properly.
+                    # ================================================================
+                    pred_count = pred_kpts[idx].shape[0]
+                    expected_count = num_kpts_for_category
+                    excess = pred_count - expected_count
+                    
+                    if excess > 10 and batch_idx == 0:  # Only warn once
+                        import warnings
+                        warnings.warn(
+                            f"⚠️  Model generated {pred_count} keypoints but expected ~{expected_count}. "
+                            f"Excess: {excess} keypoints. This suggests the model didn't learn to "
+                            f"predict EOS properly. The model may need retraining with EOS token "
+                            f"included in the classification loss."
+                        )
+                    
                     # Trim to actual number of keypoints for this category
                     pred_kpts_trimmed.append(pred_kpts[idx, :num_kpts_for_category, :])
                     gt_kpts_trimmed.append(gt_kpts[idx, :num_kpts_for_category, :])

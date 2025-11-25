@@ -5,8 +5,10 @@ This module provides functions to extract keypoints from model-generated
 sequences, handling token types and coordinate filtering.
 """
 
+import os
 import torch
 from typing import Optional
+from datasets.token_types import TokenType
 
 
 def extract_keypoints_from_predictions(
@@ -51,6 +53,13 @@ def extract_keypoints_from_predictions(
         # TokenType.coord.value is 0, which indicates a coordinate token
         coord_mask = pred_token_types[i] == TokenType.coord.value
         kpts = pred_coords[i][coord_mask]
+        
+        # Debug logging for keypoint count diagnostic
+        if os.environ.get('DEBUG_KEYPOINT_COUNT', '0') == '1' and i == 0:
+            print(f"[DIAG sequence_utils] Extracted {len(kpts)} keypoints from predicted sequence")
+            print(f"  Total tokens: {len(pred_token_types[i])}")
+            print(f"  COORD tokens: {(pred_token_types[i] == TokenType.coord.value).sum()}")
+            print(f"  max_keypoints param: {max_keypoints}")
         
         # Limit to max_keypoints if specified
         if max_keypoints is not None and len(kpts) > max_keypoints:

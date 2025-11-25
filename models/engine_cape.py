@@ -438,10 +438,58 @@ def evaluate_cape(model, criterion, data_loader, device, compute_pck=True, pck_t
             print(f"  Support coords shape: {support_coords.shape}")
             print(f"  Predictions shape: {predictions.get('coordinates', torch.zeros(1)).shape}")
         
-        # Convert predictions to outputs format for loss computation (if needed)
+        # ========================================================================
+        # CRITICAL FIX: Pad autoregressive predictions to match target length
+        # ========================================================================
+        # Problem: Autoregressive inference generates variable-length sequences
+        #          (e.g., 18 tokens when EOS predicted early), but targets have
+        #          fixed length (200 tokens). This causes shape mismatch in loss.
+        #
+        # Solution: Pad predictions to target length before computing loss.
+        #          The visibility mask will ensure padding doesn't affect loss.
+        # ========================================================================
+        pred_logits = predictions.get('logits', None)
+        pred_coords = predictions.get('coordinates', None)
+        
+        if pred_logits is not None and pred_coords is not None:
+            batch_size, pred_seq_len = pred_logits.shape[:2]
+            target_seq_len = query_targets['target_seq'].shape[1]
+            
+            if pred_seq_len < target_seq_len:
+                # Pad predictions to match target length
+                pad_len = target_seq_len - pred_seq_len
+                
+                # Pad logits with padding token logits (all zeros except padding class)
+                vocab_size = pred_logits.shape[-1]
+                pad_logits = torch.zeros(
+                    batch_size, pad_len, vocab_size,
+                    dtype=pred_logits.dtype,
+                    device=pred_logits.device
+                )
+                # Set padding class to high value (if we know the padding token index)
+                # For now, leave as zeros (the mask will exclude these from loss anyway)
+                
+                pred_logits_padded = torch.cat([pred_logits, pad_logits], dim=1)
+                
+                # Pad coordinates with zeros
+                pad_coords = torch.zeros(
+                    batch_size, pad_len, 2,
+                    dtype=pred_coords.dtype,
+                    device=pred_coords.device
+                )
+                pred_coords_padded = torch.cat([pred_coords, pad_coords], dim=1)
+            else:
+                # No padding needed (or predictions longer than targets - shouldn't happen)
+                pred_logits_padded = pred_logits[:, :target_seq_len]
+                pred_coords_padded = pred_coords[:, :target_seq_len]
+        else:
+            pred_logits_padded = pred_logits
+            pred_coords_padded = pred_coords
+        
+        # Convert predictions to outputs format for loss computation
         outputs = {
-            'pred_coords': predictions.get('coordinates', None),
-            'pred_logits': predictions.get('logits', None)
+            'pred_coords': pred_coords_padded,
+            'pred_logits': pred_logits_padded
         }
         
         # Compute loss if criterion and logits available
@@ -471,11 +519,12 @@ def evaluate_cape(model, criterion, data_loader, device, compute_pck=True, pck_t
             val_loss = 0.0
             loss_dict_reduced_scaled = {}
         
-        # Update tqdm progress bar with current PCK if available
+        # Update tqdm progress bar with current metrics
         if compute_pck and pck_evaluator is not None:
             current_results = pck_evaluator.get_results()
             pbar.set_postfix({
                 'PCK': f'{current_results["pck_overall"]:.2%}',
+                'loss': f'{val_loss:.4f}',
                 'correct': current_results['total_correct'],
                 'visible': current_results['total_visible']
             })
@@ -607,6 +656,22 @@ def evaluate_cape(model, criterion, data_loader, device, compute_pck=True, pck_t
                             
                             vis = meta.get('visibility', [])
                             num_kpts_for_category = len(vis)  # Actual number of keypoints for this category
+                            
+                            # ================================================================
+                            # CRITICAL ASSERTION: Detect keypoint count mismatch
+                            # ================================================================
+                            pred_count = pred_kpts[idx].shape[0]
+                            expected_count = num_kpts_for_category
+                            excess = pred_count - expected_count
+                            
+                            if excess > 10 and batch_idx == 0 and idx == 0:  # Warn once
+                                import warnings
+                                warnings.warn(
+                                    f"⚠️  Model generated {pred_count} keypoints but expected ~{expected_count}. "
+                                    f"Excess: {excess}. Model likely didn't learn EOS prediction properly. "
+                                    f"Recommend retraining with EOS token included in classification loss."
+                                )
+                            # ================================================================
                             
                             # Trim predictions and ground truth to match this category's keypoint count
                             # This handles variable-length sequences across different MP-100 categories
