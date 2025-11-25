@@ -19,7 +19,7 @@ import os
 import torch
 import numpy as np
 import util.misc as utils
-from typing import Iterable, Optional, Dict
+from typing import Iterable, Optional, Dict, Any
 from util.eval_utils import PCKEvaluator, compute_pck_bbox
 from tqdm import tqdm
 
@@ -48,7 +48,8 @@ def debug_log(message, force=False):
 def train_one_epoch_episodic(model: torch.nn.Module, criterion: torch.nn.Module,
                              data_loader: Iterable, optimizer: torch.optim.Optimizer,
                              device: torch.device, epoch: int, max_norm: float = 0,
-                             print_freq: int = 10, accumulation_steps: int = 1):
+                             print_freq: int = 10, accumulation_steps: int = 1,
+                             scaler: Optional[Any] = None):
     """
     Train one epoch with episodic sampling.
 
@@ -66,6 +67,7 @@ def train_one_epoch_episodic(model: torch.nn.Module, criterion: torch.nn.Module,
         max_norm: Gradient clipping max norm
         print_freq: Print frequency
         accumulation_steps: Number of mini-batches to accumulate gradients over (default: 1, no accumulation)
+        scaler: Optional GradScaler for mixed precision training (AMP)
 
     Returns:
         stats: Dictionary of training statistics
@@ -101,7 +103,7 @@ def train_one_epoch_episodic(model: torch.nn.Module, criterion: torch.nn.Module,
                 debug_log(f"Categories in batch: {unique_cats}")
         
         # ========================================================================
-        # Move batch to device
+        # Move batch to device (with non-blocking transfer for CUDA)
         # ========================================================================
         # NOTE: After episodic_collate_fn fix #1, support tensors are REPEATED
         # to match query batch size. Each support is repeated K times (once per
@@ -109,11 +111,14 @@ def train_one_epoch_episodic(model: torch.nn.Module, criterion: torch.nn.Module,
         #
         # Shapes (where B=num_episodes, K=queries_per_episode):
         #   - All tensors have first dimension (B*K) for proper alignment
+        #
+        # CUDA OPTIMIZATION: Use non_blocking=True for faster data transfer
         # ========================================================================
-        support_images = batch['support_images'].to(device)  # (B*K, C, H, W) - repeated!
-        support_coords = batch['support_coords'].to(device)  # (B*K, N, 2) - repeated!
-        support_masks = batch['support_masks'].to(device)    # (B*K, N) - repeated!
-        query_images = batch['query_images'].to(device)      # (B*K, C, H, W)
+        non_blocking = device.type == 'cuda'  # Only use non-blocking for CUDA
+        support_images = batch['support_images'].to(device, non_blocking=non_blocking)  # (B*K, C, H, W) - repeated!
+        support_coords = batch['support_coords'].to(device, non_blocking=non_blocking)  # (B*K, N, 2) - repeated!
+        support_masks = batch['support_masks'].to(device, non_blocking=non_blocking)    # (B*K, N) - repeated!
+        query_images = batch['query_images'].to(device, non_blocking=non_blocking)      # (B*K, C, H, W)
 
         # Skeleton edges (list of length B*K, not moved to device)
         # Used in adjacency matrix construction for graph-based encoding
@@ -122,7 +127,7 @@ def train_one_epoch_episodic(model: torch.nn.Module, criterion: torch.nn.Module,
         # Query targets (seq_data)
         query_targets = {}
         for key, value in batch['query_targets'].items():
-            query_targets[key] = value.to(device)
+            query_targets[key] = value.to(device, non_blocking=non_blocking)
         
         # ========================================================================
         # DEBUG: Log tensor shapes and verify query targets come from queries
@@ -148,22 +153,31 @@ def train_one_epoch_episodic(model: torch.nn.Module, criterion: torch.nn.Module,
                     debug_log("  ⚠️  WARNING: Query targets match support! This may indicate a bug.")
             debug_log("=" * 80 + "\n")
 
-        # Forward pass
-        # Model expects query images and support conditioning (including skeleton edges)
-        outputs = model(
-            samples=query_images,
-            support_coords=support_coords,
-            support_mask=support_masks,
-            targets=query_targets,
-            skeleton_edges=support_skeletons
-        )
+        # ========================================================================
+        # Forward pass with Mixed Precision Training (AMP)
+        # ========================================================================
+        # CUDA OPTIMIZATION: Use autocast for mixed precision training
+        # This can provide ~2x speedup on modern GPUs (V100, A100, RTX 30xx+)
+        # ========================================================================
+        use_amp = scaler is not None and device.type == 'cuda'
+        
+        with torch.cuda.amp.autocast(enabled=use_amp):
+            # Forward pass
+            # Model expects query images and support conditioning (including skeleton edges)
+            outputs = model(
+                samples=query_images,
+                support_coords=support_coords,
+                support_mask=support_masks,
+                targets=query_targets,
+                skeleton_edges=support_skeletons
+            )
 
-        # Compute loss
-        loss_dict = criterion(outputs, query_targets)
+            # Compute loss
+            loss_dict = criterion(outputs, query_targets)
 
-        # Weight losses
-        weight_dict = criterion.weight_dict
-        losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
+            # Weight losses
+            weight_dict = criterion.weight_dict
+            losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
 
         # Reduce losses over all GPUs for logging
         loss_dict_reduced = utils.reduce_dict(loss_dict)
@@ -200,17 +214,29 @@ def train_one_epoch_episodic(model: torch.nn.Module, criterion: torch.nn.Module,
         # This ensures gradient magnitudes are consistent regardless of accumulation
         normalized_loss = losses / accumulation_steps
         
-        # Backward pass (accumulate gradients)
-        normalized_loss.backward()
+        # Backward pass (accumulate gradients) with AMP scaler
+        if use_amp:
+            scaler.scale(normalized_loss).backward()
+        else:
+            normalized_loss.backward()
         
         # Only update weights every accumulation_steps iterations
         if (batch_idx + 1) % accumulation_steps == 0:
             # Gradient clipping (applied to accumulated gradients)
             if max_norm > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+                if use_amp:
+                    # Unscale gradients before clipping when using AMP
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+                else:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
             
-            # Update weights
-            optimizer.step()
+            # Update weights with AMP scaler
+            if use_amp:
+                scaler.step(optimizer)
+                scaler.update()  # Update scaler for next iteration
+            else:
+                optimizer.step()
             
             # Clear accumulated gradients
             optimizer.zero_grad()
@@ -236,11 +262,20 @@ def train_one_epoch_episodic(model: torch.nn.Module, criterion: torch.nn.Module,
     # we need to perform a final update with the remaining accumulated gradients.
     # ========================================================================
     total_batches = batch_idx + 1
+    use_amp = scaler is not None and device.type == 'cuda'
     if total_batches % accumulation_steps != 0:
         print(f"  → Performing final gradient update with remaining {total_batches % accumulation_steps} accumulated batches")
         if max_norm > 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
-        optimizer.step()
+            if use_amp:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+            else:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+        if use_amp:
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            optimizer.step()
         optimizer.zero_grad()
 
     # Gather stats from all processes
@@ -369,23 +404,26 @@ def evaluate_cape(model, criterion, data_loader, device, compute_pck=True, pck_t
         # ========================================================================
         
         # ========================================================================
-        # Move batch to device
+        # Move batch to device (with non-blocking transfer for CUDA)
         # ========================================================================
         # NOTE: After episodic_collate_fn fix #1, all tensors have matching
         # batch size (B*K) where each support is repeated K times to align
         # with its corresponding queries.
+        #
+        # CUDA OPTIMIZATION: Use non_blocking=True for faster data transfer
         # ========================================================================
-        support_images = batch['support_images'].to(device)  # (B*K, C, H, W)
-        support_coords = batch['support_coords'].to(device)  # (B*K, N, 2)
-        support_masks = batch['support_masks'].to(device)    # (B*K, N)
-        query_images = batch['query_images'].to(device)      # (B*K, C, H, W)
+        non_blocking = device.type == 'cuda'  # Only use non-blocking for CUDA
+        support_images = batch['support_images'].to(device, non_blocking=non_blocking)  # (B*K, C, H, W)
+        support_coords = batch['support_coords'].to(device, non_blocking=non_blocking)  # (B*K, N, 2)
+        support_masks = batch['support_masks'].to(device, non_blocking=non_blocking)    # (B*K, N)
+        query_images = batch['query_images'].to(device, non_blocking=non_blocking)      # (B*K, C, H, W)
 
         # Skeleton edges (list of length B*K)
         support_skeletons = batch.get('support_skeletons', None)
 
         query_targets = {}
         for key, value in batch['query_targets'].items():
-            query_targets[key] = value.to(device)
+            query_targets[key] = value.to(device, non_blocking=non_blocking)
 
         # ========================================================================
         # CRITICAL FIX: Use forward_inference for REAL validation
@@ -752,14 +790,17 @@ def evaluate_unseen_categories(
             debug_log(f"Batch contains {len(batch.get('query_images', []))} queries")
         
         # ========================================================================
-        # Move batch to device
+        # Move batch to device (with non-blocking transfer for CUDA)
         # ========================================================================
         # NOTE: All tensors have matching batch size (B*K) after collate_fn fix
+        #
+        # CUDA OPTIMIZATION: Use non_blocking=True for faster data transfer
         # ========================================================================
-        support_images = batch['support_images'].to(device)  # (B*K, C, H, W)
-        support_coords = batch['support_coords'].to(device)  # (B*K, N, 2)
-        support_masks = batch['support_masks'].to(device)    # (B*K, N)
-        query_images = batch['query_images'].to(device)      # (B*K, C, H, W)
+        non_blocking = device.type == 'cuda'  # Only use non-blocking for CUDA
+        support_images = batch['support_images'].to(device, non_blocking=non_blocking)  # (B*K, C, H, W)
+        support_coords = batch['support_coords'].to(device, non_blocking=non_blocking)  # (B*K, N, 2)
+        support_masks = batch['support_masks'].to(device, non_blocking=non_blocking)    # (B*K, N)
+        query_images = batch['query_images'].to(device, non_blocking=non_blocking)      # (B*K, C, H, W)
         support_skeletons = batch.get('support_skeletons', None)  # List[B*K]
 
         # Get category IDs and metadata
@@ -769,7 +810,7 @@ def evaluate_unseen_categories(
         # Get ground truth targets
         query_targets = {}
         for key, value in batch['query_targets'].items():
-            query_targets[key] = value.to(device)
+            query_targets[key] = value.to(device, non_blocking=non_blocking)
         
         # ========================================================================
         # DEBUG: Log that query GT is NOT passed to forward_inference

@@ -138,7 +138,8 @@ class EpisodicDataset(data.Dataset):
     """
 
     def __init__(self, base_dataset, category_split_file, split='train',
-                 num_queries_per_episode=2, episodes_per_epoch=1000, seed=None):
+                 num_queries_per_episode=2, episodes_per_epoch=1000, seed=None,
+                 debug_single_image=None, debug_single_image_category=None):
         """
         Args:
             base_dataset: MP100CAPE dataset instance
@@ -147,18 +148,30 @@ class EpisodicDataset(data.Dataset):
             num_queries_per_episode: Number of query images per episode
             episodes_per_epoch: Number of episodes per training epoch
             seed: Random seed
+            debug_single_image: Optional image index for single-image debug mode
+            debug_single_image_category: Optional category ID for single-image debug mode
         """
         self.base_dataset = base_dataset
         self.episodes_per_epoch = episodes_per_epoch
-
-        # Create episodic sampler
-        self.sampler = EpisodicSampler(
-            base_dataset,
-            category_split_file,
-            split=split,
-            num_queries_per_episode=num_queries_per_episode,
-            seed=seed
-        )
+        
+        # Single-image debug mode
+        self.debug_single_image = debug_single_image
+        self.debug_single_image_category = debug_single_image_category
+        
+        if self.debug_single_image is not None:
+            print(f"⚠️  SINGLE IMAGE MODE: Using image index {self.debug_single_image} from category {self.debug_single_image_category}")
+            print(f"   Same image will be used as both support and query (self-supervised)")
+            # Don't create sampler for single-image mode
+            self.sampler = None
+        else:
+            # Create episodic sampler
+            self.sampler = EpisodicSampler(
+                base_dataset,
+                category_split_file,
+                split=split,
+                num_queries_per_episode=num_queries_per_episode,
+                seed=seed
+            )
 
         print(f"EpisodicDataset: {episodes_per_epoch} episodes/epoch, "
               f"{num_queries_per_episode} queries/episode")
@@ -180,6 +193,66 @@ class EpisodicDataset(data.Dataset):
                 - query_targets: List of query keypoint targets (seq_data)
                 - category_id: Category ID
         """
+        # ========================================================================
+        # SINGLE IMAGE MODE: Use the same image as both support and query
+        # ========================================================================
+        if self.debug_single_image is not None:
+            # Load the single image
+            image_data = self.base_dataset[self.debug_single_image]
+            
+            # Use same image for both support and query (self-supervised)
+            support_data = image_data
+            query_data = image_data
+            
+            # Extract support pose graph
+            support_coords = torch.tensor(support_data['keypoints'], dtype=torch.float32)
+            h, w = support_data['height'], support_data['width']
+            support_coords[:, 0] /= w
+            support_coords[:, 1] /= h
+            
+            # Create support mask
+            support_visibility = support_data['visibility']
+            support_mask = torch.tensor(
+                [v > 0 for v in support_visibility], 
+                dtype=torch.bool
+            )
+            support_skeleton = support_data.get('skeleton', [])
+            
+            # Extract query targets (same as support for self-supervised)
+            query_targets = query_data['seq_data']
+            
+            # Return episode with single query (same image)
+            return {
+                'support_image': support_data['image'],
+                'support_coords': support_coords,
+                'support_mask': support_mask,
+                'support_skeleton': support_skeleton,
+                'support_metadata': {
+                    'image_id': support_data.get('image_id'),
+                    'category_id': self.debug_single_image_category,
+                    'height': h,
+                    'width': w,
+                    'bbox_width': support_data.get('bbox_width', w),
+                    'bbox_height': support_data.get('bbox_height', h),
+                    'visibility': support_visibility
+                },
+                'query_images': [query_data['image']],
+                'query_targets': [query_targets],
+                'query_metadata': [{
+                    'image_id': query_data.get('image_id'),
+                    'category_id': self.debug_single_image_category,
+                    'height': query_data.get('height', h),
+                    'width': query_data.get('width', w),
+                    'bbox_width': query_data.get('bbox_width', w),
+                    'bbox_height': query_data.get('bbox_height', h),
+                    'visibility': query_data['visibility']
+                }],
+                'category_id': self.debug_single_image_category
+            }
+        
+        # ========================================================================
+        # NORMAL MODE: Sample episodes from dataset
+        # ========================================================================
         # Keep trying until we find a valid episode (skip missing images)
         max_retries = 100  # High limit to prevent infinite loops, but should rarely be hit
         retry_count = 0
@@ -506,7 +579,8 @@ def episodic_collate_fn(batch):
 
 def build_episodic_dataloader(base_dataset, category_split_file, split='train',
                               batch_size=2, num_queries_per_episode=2,
-                              episodes_per_epoch=1000, num_workers=2, seed=None):
+                              episodes_per_epoch=1000, num_workers=2, seed=None,
+                              debug_single_image=None, debug_single_image_category=None):
     """
     Build episodic dataloader for CAPE training/validation/testing.
 
@@ -519,6 +593,8 @@ def build_episodic_dataloader(base_dataset, category_split_file, split='train',
         episodes_per_epoch: Total episodes per epoch
         num_workers: Number of worker processes
         seed: Random seed
+        debug_single_image: Optional image index for single-image debug mode
+        debug_single_image_category: Optional category ID for single-image debug mode
 
     Returns:
         dataloader: DataLoader with episodic sampling
@@ -530,7 +606,9 @@ def build_episodic_dataloader(base_dataset, category_split_file, split='train',
         split=split,
         num_queries_per_episode=num_queries_per_episode,
         episodes_per_epoch=episodes_per_epoch,
-        seed=seed
+        seed=seed,
+        debug_single_image=debug_single_image,
+        debug_single_image_category=debug_single_image_category
     )
 
     # Create dataloader

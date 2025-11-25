@@ -69,6 +69,10 @@ def get_args_parser():
                         help='DEBUG: Train on single category ID for overfitting test (ignores category_split_file)')
     parser.add_argument('--debug_overfit_episodes', default=10, type=int,
                         help='DEBUG: Number of episodes per epoch when using --debug_overfit_category')
+    parser.add_argument('--debug_single_image', default=None, type=int,
+                        help='DEBUG: Train on single image from specified category ID. Uses first available image from that category.')
+    parser.add_argument('--debug_single_image_index', default=None, type=int,
+                        help='DEBUG: Specific image index to use (within the category). If not specified, uses first image.')
 
     # Learning rate parameters
     parser.add_argument('--lr', default=1e-4, type=float)
@@ -177,6 +181,14 @@ def get_args_parser():
     parser.add_argument('--print_freq', default=10, type=int,
                         help='Print frequency during training')
 
+    # CUDA optimizations
+    parser.add_argument('--use_amp', action='store_true', default=True,
+                        help='Use Automatic Mixed Precision (AMP) for faster training (default: True)')
+    parser.add_argument('--cudnn_benchmark', action='store_true', default=True,
+                        help='Enable cuDNN benchmark mode for faster convolutions (default: True)')
+    parser.add_argument('--cudnn_deterministic', action='store_true', default=False,
+                        help='Use deterministic cuDNN algorithms (slower but reproducible)')
+
     return parser
 
 
@@ -191,6 +203,48 @@ def get_device():
     else:
         device = torch.device("cpu")
     return device
+
+
+def setup_cuda_optimizations(args, device):
+    """
+    Setup CUDA optimizations for faster training.
+    
+    Args:
+        args: Training arguments
+        device: PyTorch device
+    """
+    if device.type != 'cuda':
+        return None, device  # Return device even if not CUDA
+    
+    # Enable cuDNN benchmark for faster convolutions (if input sizes don't vary)
+    if args.cudnn_benchmark:
+        torch.backends.cudnn.benchmark = True
+        print("✓ cuDNN benchmark mode enabled (faster convolutions)")
+    
+    # Set deterministic mode if requested (slower but reproducible)
+    if args.cudnn_deterministic:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        print("✓ cuDNN deterministic mode enabled (reproducible but slower)")
+    
+    # Setup mixed precision training (AMP) - only for CUDA
+    scaler = None
+    if args.use_amp and device.type == 'cuda':
+        try:
+            scaler = torch.cuda.amp.GradScaler()
+            print("✓ Mixed precision training (AMP) enabled")
+            print("  → Expected speedup: ~2x on modern GPUs")
+        except Exception as e:
+            print(f"⚠️  Warning: Failed to create AMP scaler: {e}")
+            print("   Continuing without AMP...")
+    
+    # Print CUDA memory info
+    if device.type == 'cuda' and torch.cuda.is_available():
+        print(f"✓ CUDA Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
+        print(f"✓ CUDA Version: {torch.version.cuda}")
+        print(f"✓ cuDNN Version: {torch.backends.cudnn.version()}")
+    
+    return scaler, device
 
 
 def main(args):
@@ -216,6 +270,12 @@ def main(args):
         print(f"  GPU: {torch.cuda.get_device_name(0)}")
         print(f"  CUDA Version: {torch.version.cuda}")
         print(f"  GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
+    print()
+    
+    # Setup CUDA optimizations
+    scaler, device = setup_cuda_optimizations(args, device)
+    if scaler is None and device.type == 'cuda':
+        print("⚠️  Warning: AMP scaler not created (AMP disabled or not on CUDA)")
     print()
 
     # Set random seed
@@ -334,6 +394,75 @@ def main(args):
         
         category_split_file = Path(temp_split_path)
         print(f"Using temporary category split: {category_split_file}\n")
+    
+    # ========================================================================
+    # DEBUG SINGLE IMAGE MODE: Train on ONE image from a specific category
+    # ========================================================================
+    # This is the most extreme overfitting test - train on a single image.
+    # The same image is used as both support and query (self-supervised).
+    #
+    # Use case:
+    #   python train_cape_episodic.py \
+    #       --debug_single_image 40 \
+    #       --debug_single_image_index 0 \
+    #       --epochs 50 \
+    #       --output_dir outputs/debug_single_image
+    #
+    # Expected behavior:
+    #   - Training loss should drop to near-zero within ~10 epochs
+    #   - Perfect overfitting on that single image
+    # ========================================================================
+    single_image_mode = False
+    single_image_category = None
+    single_image_idx = None
+    
+    if args.debug_single_image is not None:
+        print("\n" + "=" * 80)
+        print("⚠️  DEBUG SINGLE IMAGE MODE ENABLED")
+        print("=" * 80)
+        print(f"Training on SINGLE IMAGE from category: {args.debug_single_image}")
+        
+        # Find the first available image from this category
+        from datasets.mp100_cape import build_mp100_cape
+        temp_dataset = build_mp100_cape('train', args)
+        
+        # Find images from this category
+        category_images = []
+        for idx in range(len(temp_dataset)):
+            try:
+                img_id = temp_dataset.ids[idx]
+                ann_ids = temp_dataset.coco.getAnnIds(imgIds=img_id)
+                anns = temp_dataset.coco.loadAnns(ann_ids)
+                if len(anns) > 0:
+                    cat_id = anns[0].get('category_id', 0)
+                    if cat_id == args.debug_single_image:
+                        category_images.append(idx)
+            except:
+                continue
+        
+        if len(category_images) == 0:
+            raise ValueError(f"No images found for category {args.debug_single_image}")
+        
+        # Select image index
+        if args.debug_single_image_index is not None:
+            if args.debug_single_image_index >= len(category_images):
+                raise ValueError(f"Image index {args.debug_single_image_index} out of range. "
+                               f"Category {args.debug_single_image} has {len(category_images)} images.")
+            single_image_idx = category_images[args.debug_single_image_index]
+        else:
+            single_image_idx = category_images[0]
+        
+        single_image_category = args.debug_single_image
+        single_image_mode = True
+        
+        print(f"Selected image index: {single_image_idx} (image {category_images.index(single_image_idx) + 1} of {len(category_images)} in category)")
+        print(f"Episodes per epoch: {args.episodes_per_epoch}")
+        print(f"Expected: Training loss → 0 within ~10 epochs")
+        print(f"Purpose: Extreme overfitting test on single image")
+        print("=" * 80 + "\n")
+        
+        # Override episodes_per_epoch for fast overfitting
+        args.episodes_per_epoch = min(args.episodes_per_episode, 50)  # Limit episodes for single image
 
     train_loader = build_episodic_dataloader(
         base_dataset=train_dataset,
@@ -343,7 +472,9 @@ def main(args):
         num_queries_per_episode=args.num_queries_per_episode,
         episodes_per_epoch=args.episodes_per_epoch,
         num_workers=args.num_workers,
-        seed=args.seed
+        seed=args.seed,
+        debug_single_image=single_image_idx if single_image_mode else None,
+        debug_single_image_category=single_image_category if single_image_mode else None
     )
 
     # ========================================================================
@@ -503,7 +634,8 @@ def main(args):
             epoch=epoch,
             max_norm=args.clip_max_norm,
             print_freq=args.print_freq,
-            accumulation_steps=args.accumulation_steps
+            accumulation_steps=args.accumulation_steps,
+            scaler=scaler  # Pass scaler for AMP
         )
 
         lr_scheduler.step()
