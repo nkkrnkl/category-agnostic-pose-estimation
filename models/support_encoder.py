@@ -305,7 +305,8 @@ class SupportGraphAggregator(nn.Module):
             if support_mask is not None:
                 # Masked max
                 mask_expanded = support_mask.unsqueeze(-1).float()  # (B, N, 1)
-                masked_embeddings = support_embeddings * mask_expanded + (1 - mask_expanded) * (-1e9)
+                # Use -1e4 instead of -1e9 for float16 compatibility (max representable ~65504)
+                masked_embeddings = support_embeddings * mask_expanded + (1 - mask_expanded) * (-1e4)
                 aggregated = masked_embeddings.max(dim=1)[0]
             else:
                 aggregated = support_embeddings.max(dim=1)[0]
@@ -318,7 +319,8 @@ class SupportGraphAggregator(nn.Module):
             if support_mask is not None:
                 # Mask invalid keypoints
                 mask_expanded = support_mask.unsqueeze(-1).float()  # (B, N, 1)
-                attn_weights = attn_weights.masked_fill(~mask_expanded.bool(), -1e9)
+                # Use -1e4 instead of -1e9 for float16 compatibility (max representable ~65504)
+                attn_weights = attn_weights.masked_fill(~mask_expanded.bool(), -1e4)
 
             # Softmax over keypoints
             attn_weights = F.softmax(attn_weights, dim=1)  # (B, N, 1)
