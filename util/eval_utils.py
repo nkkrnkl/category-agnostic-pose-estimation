@@ -7,6 +7,7 @@ Implements PCK@bbox (Percentage of Correct Keypoints) metric as used in:
 - MP-100 benchmark
 """
 
+import os
 import numpy as np
 import torch
 from typing import Dict, List, Tuple, Optional, Union
@@ -104,6 +105,24 @@ def compute_pck_bbox(
     pred_visible = pred_keypoints[visible_mask]
     gt_visible = gt_keypoints[visible_mask]
     
+    # ========================================================================
+    # SANITY CHECK: Verify predictions are not identical to GT
+    # ========================================================================
+    # If predictions perfectly match GT, this indicates:
+    # - Data leakage (model seeing GT during inference)
+    # - Bug in model (copying GT coordinates)
+    # - Incorrect evaluation setup (using teacher forcing during validation)
+    # ========================================================================
+    if np.allclose(pred_visible, gt_visible, atol=1e-6):
+        import warnings
+        warnings.warn(
+            "Predictions are IDENTICAL to ground truth! "
+            "This indicates data leakage or a bug in the model. "
+            "Check that evaluation uses forward_inference (not teacher forcing).",
+            RuntimeWarning
+        )
+    # ========================================================================
+    
     # Compute Euclidean distance for each keypoint
     # distances shape: (num_visible,)
     distances = np.sqrt(np.sum((pred_visible - gt_visible) ** 2, axis=1))
@@ -130,6 +149,22 @@ def compute_pck_bbox(
     
     # Compute PCK
     pck = num_correct / num_visible
+    
+    # ========================================================================
+    # DEBUG: Log PCK computation details
+    # ========================================================================
+    DEBUG_PCK = os.environ.get('DEBUG_PCK', '0') == '1'
+    if DEBUG_PCK:
+        print(f"\n[DEBUG_PCK] compute_pck_bbox:")
+        print(f"  num_visible: {num_visible}")
+        print(f"  bbox_size: {bbox_size:.2f}")
+        print(f"  threshold (alpha): {threshold}")
+        print(f"  threshold (pixels): {threshold * bbox_size:.2f}")
+        print(f"  distances (first 5): {distances[:5]}")
+        print(f"  normalized_distances (first 5): {normalized_distances[:5]}")
+        print(f"  num_correct: {num_correct} / {num_visible}")
+        print(f"  PCK: {pck:.2%}")
+    # ========================================================================
     
     return float(pck), int(num_correct), int(num_visible)
 

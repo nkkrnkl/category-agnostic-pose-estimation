@@ -371,8 +371,50 @@ def run_evaluation(model: nn.Module, dataloader: DataLoader, device: torch.devic
             
             # Extract keypoints from sequences
             try:
-                pred_kpts = extract_keypoints_from_sequence(pred_coords, token_labels, mask)
+                # ================================================================
+                # CRITICAL FIX: Extract GT using GT structure, predictions using PREDICTED structure
+                # ================================================================
+                # BUG: Previously used GT token labels for both pred and GT extraction
+                # This assumes model generates EXACTLY the same token sequence as GT
+                # FIX: Use predicted token types from model output for predictions
+                # ================================================================
+                
+                # Extract GT using GT token labels (correct)
                 gt_kpts = extract_keypoints_from_sequence(gt_coords, token_labels, mask)
+                
+                # Extract predictions using PREDICTED token labels (fixed)
+                pred_logits = predictions.get('logits', None)
+                if pred_logits is not None:
+                    # Use model's predicted token types
+                    from util.sequence_utils import extract_keypoints_from_predictions
+                    pred_kpts = extract_keypoints_from_predictions(
+                        pred_coords, pred_logits, max_keypoints=gt_kpts.shape[1]
+                    )
+                else:
+                    # Fallback if logits not available
+                    # Still use GT structure but add WARNING
+                    if batch_idx == 0:
+                        print("⚠️  WARNING: Using GT token structure for predictions (logits unavailable)")
+                        print("   This may cause incorrect PCK if model's token sequence differs from GT")
+                    pred_kpts = extract_keypoints_from_sequence(pred_coords, token_labels, mask)
+                
+                # ================================================================
+                # DEBUG: Verify predictions are different from GT
+                # ================================================================
+                DEBUG_PCK = os.environ.get('DEBUG_PCK', '0') == '1'
+                if DEBUG_PCK and batch_idx == 0:
+                    print(f"\n[DEBUG_PCK] Batch 0 - Keypoint Extraction:")
+                    print(f"  Using predicted token labels: {pred_logits is not None}")
+                    print(f"  pred_kpts[0] shape: {pred_kpts[0].shape}")
+                    print(f"  gt_kpts[0] shape: {gt_kpts[0].shape}")
+                    print(f"  pred_kpts[0, :3]: {pred_kpts[0, :3]}")
+                    print(f"  gt_kpts[0, :3]: {gt_kpts[0, :3]}")
+                    are_identical = torch.allclose(pred_kpts[0], gt_kpts[0], atol=1e-6)
+                    print(f"  Are they identical? {are_identical}")
+                    if are_identical:
+                        print(f"  ⚠️  CRITICAL: Predictions are IDENTICAL to GT!")
+                        print(f"  This indicates data leakage or a bug in the model.")
+                # ================================================================
                 
                 # Track prediction statistics
                 for idx in range(pred_kpts.shape[0]):
@@ -426,10 +468,26 @@ def run_evaluation(model: nn.Module, dataloader: DataLoader, device: torch.devic
                 pred_kpts_trimmed = pred_kpts
                 gt_kpts_trimmed = gt_kpts
             
+            # ================================================================
+            # CRITICAL FIX: Scale keypoints to PIXEL space for PCK computation
+            # ================================================================
+            # BUG: Keypoints are in [0,1] normalized space (relative to 512x512 image)
+            #      but bbox dimensions are in PIXELS (original bbox size before resize)
+            # This creates a ~100x scaling error in PCK threshold!
+            # 
+            # FIX: Scale keypoints to pixel space before PCK:
+            #   - Keypoints are in [0,1] relative to 512x512 image
+            #   - Multiply by 512 to get pixel coordinates
+            #   - Then compute PCK using pixel coords and pixel bbox dims
+            # ================================================================
+            pred_kpts_trimmed_pixels = [kpts * 512.0 for kpts in pred_kpts_trimmed]
+            gt_kpts_trimmed_pixels = [kpts * 512.0 for kpts in gt_kpts_trimmed]
+            # ================================================================
+            
             # Add to PCK evaluator
             pck_evaluator.add_batch(
-                pred_keypoints=pred_kpts_trimmed,
-                gt_keypoints=gt_kpts_trimmed,
+                pred_keypoints=pred_kpts_trimmed_pixels,  # NOW IN PIXELS!
+                gt_keypoints=gt_kpts_trimmed_pixels,      # NOW IN PIXELS!
                 bbox_widths=bbox_widths,
                 bbox_heights=bbox_heights,
                 category_ids=batch.get('category_ids', None),

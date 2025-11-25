@@ -9,6 +9,7 @@ This module implements episodic training where each episode consists of:
 This trains the model to use support pose graphs to generalize to new categories.
 """
 
+import os
 import torch
 import torch.utils.data as data
 import numpy as np
@@ -298,6 +299,29 @@ class EpisodicDataset(data.Dataset):
                         'bbox_height': query_data.get('bbox_height', query_data['height']),
                         'visibility': visibility  # Guaranteed to be correct length
                     })
+                    
+                    # ================================================================
+                    # DEBUG: Verify bbox dimensions are ORIGINAL, not preprocessed
+                    # ================================================================
+                    # Bbox dimensions should be the ORIGINAL bbox size from COCO annotations,
+                    # NOT the preprocessed 512x512 size. These are used for PCK threshold.
+                    # ================================================================
+                    DEBUG_PCK = os.environ.get('DEBUG_PCK', '0') == '1'
+                    if DEBUG_PCK and len(query_metadata) == 1:  # First query only
+                        bbox_w = query_metadata[0]['bbox_width']
+                        bbox_h = query_metadata[0]['bbox_height']
+                        if bbox_w == 512.0 and bbox_h == 512.0:
+                            import warnings
+                            warnings.warn(
+                                f"Bbox dimensions are exactly 512x512 for image {query_data['image_id']}. "
+                                "This may indicate preprocessed dims instead of original bbox size.",
+                                RuntimeWarning
+                            )
+                        print(f"\n[DEBUG_PCK] Bbox metadata check:")
+                        print(f"  Image ID: {query_data['image_id']}")
+                        print(f"  Original bbox_width: {bbox_w}")
+                        print(f"  Original bbox_height: {bbox_h}")
+                    # ================================================================
 
                 # Successfully loaded all images - return the episode
                 return {
