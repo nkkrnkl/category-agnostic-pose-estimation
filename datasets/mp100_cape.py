@@ -854,7 +854,10 @@ def build_mp100_cape(image_set, args):
     if image_set == 'train':
         # Training: APPEARANCE-ONLY augmentation
         import albumentations as A
-        transforms = A.Compose([
+        import inspect
+        
+        # Build transform list
+        transform_list = [
             # Color jitter: Vary brightness, contrast, saturation, hue
             # This helps model generalize across different lighting conditions
             A.ColorJitter(
@@ -864,16 +867,27 @@ def build_mp100_cape(image_set, args):
                 hue=0.05,        # ±5% hue shift (small to avoid unrealistic colors)
                 p=0.6            # Apply 60% of the time
             ),
-            
-            # Gaussian noise: Add small random noise to image
-            # Helps model be robust to sensor noise and compression artifacts
-            # Using single value for var_limit to avoid version compatibility issues
-            # (Some versions don't support tuple for var_limit)
-            A.GaussNoise(
-                var_limit=15.0,  # Mean of the desired range (5.0-25.0)
-                p=0.4            # Apply 40% of the time
-            ),
-            
+        ]
+        
+        # Gaussian noise: Add small random noise to image
+        # Helps model be robust to sensor noise and compression artifacts
+        # Note: Some albumentations versions don't support var_limit parameter
+        # Check if GaussNoise accepts var_limit parameter
+        try:
+            sig = inspect.signature(A.GaussNoise.__init__)
+            if 'var_limit' in sig.parameters:
+                # Version supports var_limit
+                transform_list.append(A.GaussNoise(var_limit=15.0, p=0.4))
+            else:
+                # Version doesn't support var_limit, try without it
+                transform_list.append(A.GaussNoise(p=0.4))
+        except Exception:
+            # If inspection fails or transform doesn't exist, skip this augmentation
+            # (This is acceptable - it's a minor augmentation)
+            pass
+        
+        # Add remaining transforms
+        transform_list.extend([
             # Gaussian blur: Slight blur to simulate focus variations
             # Helps with images that may be slightly out of focus
             A.GaussianBlur(
@@ -885,7 +899,9 @@ def build_mp100_cape(image_set, args):
             # Final deterministic resize to 512x512
             # This is NOT augmentation - it's required normalization
             A.Resize(height=512, width=512),
-        ], keypoint_params=A.KeypointParams(format='xy', remove_invisible=False))
+        ])
+        
+        transforms = A.Compose(transform_list, keypoint_params=A.KeypointParams(format='xy', remove_invisible=False))
     else:
         # Validation/Test: ONLY deterministic resize (no augmentation)
         import albumentations as A

@@ -492,6 +492,8 @@ def main(args):
         # Find the dataset index that matches this file path
         found_idx = None
         sample_file_names = []  # For debugging
+        same_dir_files = []  # Files from the same directory (e.g., bison_body)
+        image_dir = os.path.dirname(image_path_normalized)  # e.g., "bison_body"
         
         for idx in range(len(temp_dataset)):
             try:
@@ -502,6 +504,11 @@ def main(args):
                 # Collect sample file names for debugging (first 5)
                 if len(sample_file_names) < 5:
                     sample_file_names.append(coco_file_name)
+                
+                # Collect files from the same directory for better debugging
+                coco_dir = os.path.dirname(normalize_path_for_comparison(coco_file_name))
+                if coco_dir == image_dir and len(same_dir_files) < 10:
+                    same_dir_files.append(coco_file_name)
                 
                 # Normalize COCO file name for comparison
                 coco_file_name_normalized = normalize_path_for_comparison(coco_file_name)
@@ -547,7 +554,7 @@ def main(args):
         # If still not found, try direct file existence check
         if found_idx is None and file_exists:
             # File exists but not matched in annotations - try to find by exact filename match
-            print(f"⚠️  File exists but not matched. Trying filename-only search...")
+            print(f"⚠️  File exists but not matched in train annotations. Trying filename-only search...")
             for idx in range(len(temp_dataset)):
                 try:
                     img_id = temp_dataset.ids[idx]
@@ -575,27 +582,80 @@ def main(args):
                 except Exception as e:
                     continue
         
+        # If still not found in train, check val and test splits
+        if found_idx is None and file_exists:
+            print(f"⚠️  File not found in train split. Checking val and test splits...")
+            for split in ['val', 'test']:
+                try:
+                    from datasets.mp100_cape import build_mp100_cape
+                    split_dataset = build_mp100_cape(split, args)
+                    for idx in range(len(split_dataset)):
+                        try:
+                            img_id = split_dataset.ids[idx]
+                            img_info = split_dataset.coco.loadImgs(img_id)[0]
+                            coco_file_name = img_info['file_name']
+                            coco_file_name_normalized = normalize_path_for_comparison(coco_file_name)
+                            
+                            # Check if this matches
+                            if (coco_file_name_normalized == image_path_normalized or 
+                                os.path.basename(coco_file_name) == filename):
+                                full_path = os.path.join(split_dataset.root, coco_file_name)
+                                if os.path.exists(full_path):
+                                    try:
+                                        same_file = os.path.samefile(full_path, full_path_check)
+                                    except (OSError, ValueError):
+                                        same_file = os.path.normpath(full_path) == os.path.normpath(full_path_check)
+                                    
+                                    if same_file:
+                                        print(f"⚠️  Found image in {split} split, not train split!")
+                                        print(f"   This image is in the {split} annotations, not train.")
+                                        print(f"   Consider using a different image from the train split.")
+                                        print(f"   Or modify the code to allow training on {split} images.")
+                                        # For now, we'll still raise an error, but with better message
+                                        raise ValueError(
+                                            f"Image found in {split} split, not train split.\n"
+                                            f"  File: {args.debug_single_image_path}\n"
+                                            f"  Found in: {split} annotations\n"
+                                            f"  COCO file_name: {coco_file_name}\n"
+                                            f"  Please use an image from the train split for training."
+                                        )
+                        except Exception as e:
+                            continue
+                except Exception as e:
+                    continue
+        
         if found_idx is None:
             # Provide detailed error message with debugging info
             error_msg = (
-                f"Image not found: {args.debug_single_image_path}\n"
+                f"Image not found in train annotations: {args.debug_single_image_path}\n"
                 f"  Searched for (normalized): {image_path_normalized}\n"
                 f"  Filename: {filename}\n"
+                f"  Directory: {image_dir}\n"
                 f"  Full path checked: {full_path_check}\n"
                 f"  File exists: {file_exists}\n"
             )
             
-            if sample_file_names:
-                error_msg += f"  Sample file names in COCO annotations:\n"
-                for sample in sample_file_names[:5]:
+            # Show files from the same directory if available (more helpful)
+            if same_dir_files:
+                error_msg += f"\n  Files from same directory ({image_dir}) in train annotations:\n"
+                for sample in same_dir_files[:10]:
+                    error_msg += f"    - {sample}\n"
+                error_msg += f"  (Found {len(same_dir_files)} files from {image_dir} directory)\n"
+            elif sample_file_names:
+                error_msg += f"\n  Sample file names in COCO train annotations:\n"
+                for sample in sample_file_names[:10]:
                     error_msg += f"    - {sample}\n"
             
             error_msg += (
-                f"  Please verify:\n"
-                f"    1. The image path is correct\n"
-                f"    2. The image exists in the data directory\n"
-                f"    3. The image is in the train annotations\n"
-                f"    4. The file_name in annotations matches the actual file path"
+                f"\n  Possible issues:\n"
+                f"    1. Image is in val/test split, not train split\n"
+                f"    2. Image exists on disk but is not annotated\n"
+                f"    3. File name format differs in annotations\n"
+                f"    4. Image was excluded from train split\n"
+                f"\n  Suggestions:\n"
+                f"    - Try a different image from the same category\n"
+                f"    - Check if the image is in val/test annotations\n"
+                f"    - Verify the image has annotations in the train split"
             )
             raise ValueError(error_msg)
         
