@@ -15,12 +15,34 @@ Key differences from standard engine.py:
 
 import math
 import sys
+import os
 import torch
 import numpy as np
 import util.misc as utils
 from typing import Iterable, Optional, Dict
 from util.eval_utils import PCKEvaluator, compute_pck_bbox
 from tqdm import tqdm
+
+# ============================================================================
+# DEBUG MODE: Enable detailed logging with environment variable
+# ============================================================================
+# Set DEBUG_CAPE=1 to enable detailed logging:
+#   export DEBUG_CAPE=1
+#   python train_cape_episodic.py ...
+#
+# Logs include:
+#   - Episode structure (support vs query indices, category IDs)
+#   - Tensor shapes at each stage
+#   - Source of decoder input sequences
+#   - Causal mask dimensions
+#   - Autoregressive loop steps
+# ============================================================================
+DEBUG_CAPE = os.environ.get('DEBUG_CAPE', '0') == '1'
+
+def debug_log(message, force=False):
+    """Print debug message if DEBUG_CAPE is enabled or force=True."""
+    if DEBUG_CAPE or force:
+        print(f"[DEBUG_CAPE] {message}")
 
 
 def train_one_epoch_episodic(model: torch.nn.Module, criterion: torch.nn.Module,
@@ -67,6 +89,18 @@ def train_one_epoch_episodic(model: torch.nn.Module, criterion: torch.nn.Module,
     
     for batch_idx, batch in enumerate(pbar):
         # ========================================================================
+        # DEBUG: Log episode structure on first batch of first epoch
+        # ========================================================================
+        if DEBUG_CAPE and batch_idx == 0 and epoch == 0:
+            debug_log("=" * 80)
+            debug_log("TRAINING EPISODE STRUCTURE (First Batch)")
+            debug_log("=" * 80)
+            debug_log(f"Batch contains {len(batch.get('category_ids', []))} total queries")
+            if 'category_ids' in batch:
+                unique_cats = torch.unique(batch['category_ids']).cpu().numpy()
+                debug_log(f"Categories in batch: {unique_cats}")
+        
+        # ========================================================================
         # Move batch to device
         # ========================================================================
         # NOTE: After episodic_collate_fn fix #1, support tensors are REPEATED
@@ -89,6 +123,30 @@ def train_one_epoch_episodic(model: torch.nn.Module, criterion: torch.nn.Module,
         query_targets = {}
         for key, value in batch['query_targets'].items():
             query_targets[key] = value.to(device)
+        
+        # ========================================================================
+        # DEBUG: Log tensor shapes and verify query targets come from queries
+        # ========================================================================
+        if DEBUG_CAPE and batch_idx == 0 and epoch == 0:
+            debug_log("\nTensor Shapes:")
+            debug_log(f"  support_coords:  {support_coords.shape}")
+            debug_log(f"  support_masks:   {support_masks.shape}")
+            debug_log(f"  query_images:    {query_images.shape}")
+            debug_log(f"  query_targets keys: {list(query_targets.keys())}")
+            if 'target_seq' in query_targets:
+                debug_log(f"  query_targets['target_seq']: {query_targets['target_seq'].shape}")
+            debug_log(f"  skeleton_edges:  List of {len(support_skeletons) if support_skeletons else 0} edge lists")
+            
+            # Verify targets are different from support
+            if 'target_seq' in query_targets:
+                # Compare first query target with first support coords
+                query_seq = query_targets['target_seq'][0, :support_coords.shape[1], :]
+                support_seq = support_coords[0, :, :]
+                are_different = not torch.allclose(query_seq, support_seq, atol=1e-4)
+                debug_log(f"\n✓ VERIFICATION: Query targets ≠ Support coords: {are_different}")
+                if not are_different:
+                    debug_log("  ⚠️  WARNING: Query targets match support! This may indicate a bug.")
+            debug_log("=" * 80 + "\n")
 
         # Forward pass
         # Model expects query images and support conditioning (including skeleton edges)
@@ -255,12 +313,16 @@ def extract_keypoints_from_sequence(
 @torch.no_grad()
 def evaluate_cape(model, criterion, data_loader, device, compute_pck=True, pck_threshold=0.2):
     """
-    Evaluate CAPE model on episodic validation set.
+    Evaluate CAPE model on episodic validation set (UNSEEN categories).
+    
+    CRITICAL: Uses autoregressive inference (forward_inference) to properly
+    test the model's ability to predict keypoints without ground truth.
+    This is the TRUE test of category-agnostic generalization.
 
     Args:
         model: CAPE model
-        criterion: Loss function
-        data_loader: Episodic validation dataloader
+        criterion: Loss function (used only if inference produces logits)
+        data_loader: Episodic validation dataloader (using split='val' for unseen categories)
         device: Device
         compute_pck: Whether to compute PCK metric (default: True)
         pck_threshold: PCK threshold (default: 0.2)
@@ -269,10 +331,11 @@ def evaluate_cape(model, criterion, data_loader, device, compute_pck=True, pck_t
         stats: Dictionary of evaluation statistics including PCK
     """
     model.eval()
-    criterion.eval()
+    if criterion is not None:
+        criterion.eval()
 
     metric_logger = utils.MetricLogger(delimiter="  ")
-    header = 'Validation:'
+    header = 'Validation (Unseen Categories):'
     
     # PCK evaluator (if enabled)
     pck_evaluator = PCKEvaluator(threshold=pck_threshold) if compute_pck else None
@@ -280,10 +343,31 @@ def evaluate_cape(model, criterion, data_loader, device, compute_pck=True, pck_t
     # Wrap data_loader with tqdm for progress bar
     # mininterval: update at most once per 2 seconds
     # miniters: update at least every 10 iterations
-    pbar = tqdm(data_loader, desc='Validation', leave=True, ncols=100,
+    pbar = tqdm(data_loader, desc='Validation (Autoregressive)', leave=True, ncols=100,
                 mininterval=2.0, miniters=10)
     
-    for batch in pbar:
+    for batch_idx, batch in enumerate(pbar):
+        # ========================================================================
+        # DEBUG: Check for data leakage (support == query)
+        # ========================================================================
+        DEBUG_VAL = os.environ.get('DEBUG_CAPE', '0') == '1'
+        if DEBUG_VAL and batch_idx == 0:
+            support_meta = batch.get('support_metadata', [])
+            query_meta = batch.get('query_metadata', [])
+            if support_meta and query_meta:
+                print(f"\n🔍 DEBUG BATCH DATA (Batch 0):")
+                print(f"  Support image IDs: {[m.get('image_id', 'N/A') for m in support_meta[:3]]}")
+                print(f"  Query image IDs: {[m.get('image_id', 'N/A') for m in query_meta[:3]]}")
+                
+                # Check for same image IDs
+                support_ids = set(m.get('image_id', None) for m in support_meta)
+                query_ids = set(m.get('image_id', None) for m in query_meta)
+                overlap = support_ids & query_ids
+                if overlap:
+                    print(f"  ⚠️  WARNING: {len(overlap)} images appear in BOTH support and query!")
+                    print(f"      Overlapping IDs: {list(overlap)[:5]}")
+        # ========================================================================
+        
         # ========================================================================
         # Move batch to device
         # ========================================================================
@@ -303,46 +387,109 @@ def evaluate_cape(model, criterion, data_loader, device, compute_pck=True, pck_t
         for key, value in batch['query_targets'].items():
             query_targets[key] = value.to(device)
 
-        # Forward pass
-        outputs = model(
+        # ========================================================================
+        # CRITICAL FIX: Use forward_inference for REAL validation
+        # ========================================================================
+        # Previously: Used teacher forcing (passed targets to model forward)
+        # Problem: PCK@100% because model saw ground truth during inference!
+        # Solution: Use autoregressive inference (forward_inference) like test
+        # ========================================================================
+        
+        # ========================================================================
+        # DEBUG: Track which inference path is used
+        # ========================================================================
+        DEBUG_VAL = os.environ.get('DEBUG_CAPE', '0') == '1'
+        inference_method_used = None
+        
+        # ========================================================================
+        # CRITICAL: Use ONLY autoregressive inference (NO fallback to teacher forcing)
+        # ========================================================================
+        # Previous bug: AttributeError was silently caught and fell back to teacher
+        # forcing, giving PCK@100%. Now we require forward_inference to exist.
+        # If it fails, we raise an error instead of silently cheating.
+        # ========================================================================
+        
+        # Check that forward_inference is available
+        if not hasattr(model, 'forward_inference'):
+            if hasattr(model, 'module') and hasattr(model.module, 'forward_inference'):
+                # DDP model
+                model_for_inference = model.module
+            else:
+                raise RuntimeError(
+                    "Model does not have forward_inference method!\n"
+                    "Cannot run proper validation without autoregressive inference.\n"
+                    "Check that the model was built correctly with a tokenizer."
+                )
+        else:
+            model_for_inference = model
+        
+        # Run autoregressive inference
+        predictions = model_for_inference.forward_inference(
             samples=query_images,
             support_coords=support_coords,
             support_mask=support_masks,
-            targets=query_targets,
             skeleton_edges=support_skeletons
         )
-
-        # Compute loss
-        loss_dict = criterion(outputs, query_targets)
-
-        # Weight losses
-        weight_dict = criterion.weight_dict
-
-        # Reduce losses
-        loss_dict_reduced = utils.reduce_dict(loss_dict)
-        loss_dict_reduced_scaled = {k: v * weight_dict[k]
-                                   for k, v in loss_dict_reduced.items() if k in weight_dict}
-        loss_dict_reduced_unscaled = {f'{k}_unscaled': v for k, v in loss_dict_reduced.items()}
-
-        # Update metrics
-        val_loss = sum(loss_dict_reduced_scaled.values())
-        metric_logger.update(loss=val_loss,
-                           **loss_dict_reduced_scaled,
-                           **loss_dict_reduced_unscaled)
-        if 'class_error' in loss_dict_reduced:
-            metric_logger.update(class_error=loss_dict_reduced['class_error'])
         
-        # Update tqdm progress bar
-        pbar.set_postfix({
-            'loss': f'{val_loss:.4f}',
-            'loss_ce': f'{loss_dict_reduced_scaled.get("loss_ce", 0):.4f}',
-            'loss_coords': f'{loss_dict_reduced_scaled.get("loss_coords", 0):.4f}'
-        })
+        if DEBUG_VAL and batch_idx == 0:
+            print(f"\n🔍 DEBUG VALIDATION (Batch 0):")
+            print(f"  ✓ Using: forward_inference (autoregressive)")
+            print(f"  Query images shape: {query_images.shape}")
+            print(f"  Support coords shape: {support_coords.shape}")
+            print(f"  Predictions shape: {predictions.get('coordinates', torch.zeros(1)).shape}")
+        
+        # Convert predictions to outputs format for loss computation (if needed)
+        outputs = {
+            'pred_coords': predictions.get('coordinates', None),
+            'pred_logits': predictions.get('logits', None)
+        }
+        
+        # Compute loss if criterion and logits available
+        loss_dict = {}
+        if criterion is not None and outputs.get('pred_logits') is not None:
+            loss_dict = criterion(outputs, query_targets)
+
+        # Weight losses (if loss was computed)
+        if loss_dict and criterion is not None:
+            weight_dict = criterion.weight_dict
+
+            # Reduce losses
+            loss_dict_reduced = utils.reduce_dict(loss_dict)
+            loss_dict_reduced_scaled = {k: v * weight_dict[k]
+                                       for k, v in loss_dict_reduced.items() if k in weight_dict}
+            loss_dict_reduced_unscaled = {f'{k}_unscaled': v for k, v in loss_dict_reduced.items()}
+
+            # Update metrics
+            val_loss = sum(loss_dict_reduced_scaled.values())
+            metric_logger.update(loss=val_loss,
+                               **loss_dict_reduced_scaled,
+                               **loss_dict_reduced_unscaled)
+            if 'class_error' in loss_dict_reduced:
+                metric_logger.update(class_error=loss_dict_reduced['class_error'])
+        else:
+            # No loss computed (inference only)
+            val_loss = 0.0
+            loss_dict_reduced_scaled = {}
+        
+        # Update tqdm progress bar with current PCK if available
+        if compute_pck and pck_evaluator is not None:
+            current_results = pck_evaluator.get_results()
+            pbar.set_postfix({
+                'PCK': f'{current_results["pck_overall"]:.2%}',
+                'correct': current_results['total_correct'],
+                'visible': current_results['total_visible']
+            })
+        else:
+            pbar.set_postfix({
+                'loss': f'{val_loss:.4f}',
+                'loss_ce': f'{loss_dict_reduced_scaled.get("loss_ce", 0):.4f}',
+                'loss_coords': f'{loss_dict_reduced_scaled.get("loss_coords", 0):.4f}'
+            })
         
         # Compute PCK if enabled
         if compute_pck and pck_evaluator is not None:
-            # Extract predicted coordinates
-            pred_coords = outputs.get('pred_coords', None)  # (B, seq_len, 2)
+            # Extract predicted coordinates from inference
+            pred_coords = predictions.get('coordinates', None)  # (B, seq_len, 2)
             
             if pred_coords is not None:
                 # Extract ground truth keypoints from targets
@@ -358,6 +505,29 @@ def evaluate_cape(model, criterion, data_loader, device, compute_pck=True, pck_t
                     gt_kpts = extract_keypoints_from_sequence(
                         gt_coords, token_labels, mask
                     )
+                    
+                    # ================================================================
+                    # DEBUG: Check if predictions match support instead of being 
+                    # actually predicted (would indicate data leakage or bug)
+                    # ================================================================
+                    if DEBUG_VAL and batch_idx == 0:
+                        print(f"\n🔍 DEBUG PCK COMPUTATION (Batch 0, Sample 0):")
+                        print(f"  Predicted coords (first 3): {pred_kpts[0, :3, :].cpu().numpy()}")
+                        print(f"  GT coords (first 3): {gt_kpts[0, :3, :].cpu().numpy()}")
+                        print(f"  Support coords (first 3): {support_coords[0, :3, :].cpu().numpy()}")
+                        
+                        # Check if predictions == support (data leakage)
+                        pred_vs_support_diff = torch.abs(pred_kpts[0] - support_coords[0][:pred_kpts.shape[1]]).mean().item()
+                        pred_vs_gt_diff = torch.abs(pred_kpts[0] - gt_kpts[0]).mean().item()
+                        
+                        print(f"  Mean diff (pred vs support): {pred_vs_support_diff:.6f}")
+                        print(f"  Mean diff (pred vs GT): {pred_vs_gt_diff:.6f}")
+                        
+                        if pred_vs_support_diff < 0.001:
+                            print(f"  ⚠️  WARNING: Predictions == Support (possible data leakage!)")
+                        if pred_vs_gt_diff < 0.001:
+                            print(f"  ⚠️  WARNING: Predictions == GT (impossible in autoregressive!)")
+                    # ================================================================
                     
                     # ================================================================
                     # CRITICAL FIX: Use actual bbox dimensions from query_metadata
@@ -433,7 +603,10 @@ def evaluate_cape(model, criterion, data_loader, device, compute_pck=True, pck_t
 
     # Gather stats
     metric_logger.synchronize_between_processes()
-    print(f"Averaged validation stats: {metric_logger}")
+    
+    # Only print loss stats if they were computed
+    if len(metric_logger.meters) > 0:
+        print(f"Averaged validation stats: {metric_logger}")
 
     stats = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
     
@@ -445,8 +618,15 @@ def evaluate_cape(model, criterion, data_loader, device, compute_pck=True, pck_t
         stats['pck_num_correct'] = pck_results['total_correct']
         stats['pck_num_visible'] = pck_results['total_visible']
         
-        print(f"\nPCK@{pck_threshold}: {pck_results['pck_overall']:.2%} "
+        print(f"\nPCK@{pck_threshold} (Autoregressive Inference): {pck_results['pck_overall']:.2%} "
               f"({pck_results['total_correct']}/{pck_results['total_visible']} keypoints)")
+        print(f"Mean PCK across categories: {pck_results['mean_pck_categories']:.2%}")
+    
+    # Set default loss if not computed
+    if 'loss' not in stats:
+        stats['loss'] = 0.0
+        stats['loss_ce'] = 0.0
+        stats['loss_coords'] = 0.0
 
     return stats
 
@@ -499,8 +679,20 @@ def evaluate_unseen_categories(
     pbar = tqdm(data_loader, desc=f'Test (Unseen) PCK@{pck_threshold}', leave=True, ncols=100,
                 mininterval=2.0, miniters=10)
     
-    for batch in pbar:
+    for batch_idx, batch in enumerate(pbar):
         num_batches += 1
+        
+        # ========================================================================
+        # DEBUG: Log unseen category evaluation structure on first batch
+        # ========================================================================
+        if DEBUG_CAPE and batch_idx == 0:
+            debug_log("=" * 80)
+            debug_log("INFERENCE ON UNSEEN CATEGORIES (First Batch)")
+            debug_log("=" * 80)
+            if 'category_ids' in batch:
+                unique_cats = torch.unique(batch['category_ids']).cpu().numpy()
+                debug_log(f"Unseen categories in batch: {unique_cats}")
+            debug_log(f"Batch contains {len(batch.get('query_images', []))} queries")
         
         # ========================================================================
         # Move batch to device
@@ -521,6 +713,19 @@ def evaluate_unseen_categories(
         query_targets = {}
         for key, value in batch['query_targets'].items():
             query_targets[key] = value.to(device)
+        
+        # ========================================================================
+        # DEBUG: Log that query GT is NOT passed to forward_inference
+        # ========================================================================
+        if DEBUG_CAPE and batch_idx == 0:
+            debug_log("\nInference Input Structure:")
+            debug_log(f"  query_images:    {query_images.shape}")
+            debug_log(f"  support_coords:  {support_coords.shape}")
+            debug_log(f"  support_masks:   {support_masks.shape}")
+            debug_log(f"  skeleton_edges:  List of {len(support_skeletons) if support_skeletons else 0}")
+            debug_log(f"  ✓ Query GT (target_seq) loaded: {query_targets.get('target_seq') is not None}")
+            debug_log(f"  ✓ Query GT will be used ONLY for metrics, NOT passed to forward_inference")
+            debug_log("=" * 80 + "\n")
 
         # Forward pass (inference mode - NO teacher forcing)
         # Use forward_inference for autoregressive generation

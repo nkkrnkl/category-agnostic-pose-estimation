@@ -1,6 +1,7 @@
 # Modified from Deformable DETR
 # Yuanwen Yue
 
+import os
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -435,7 +436,25 @@ class RoomFormerV2(nn.Module):
 
         i = 0
 
+        # ========================================================================
+        # CRITICAL FIX: Accumulate ALL outputs, not just last iteration
+        # ========================================================================
+        # BUG: Previously only returned cls_output and reg_output from the LAST
+        # iteration, even though the loop generated the full sequence.
+        # FIX: Accumulate cls_output and reg_output in lists, similar to output_hs_list.
+        # ========================================================================
         output_hs_list = []
+        output_cls_list = []  # ← NEW: Accumulate classification outputs
+        output_reg_list = []  # ← NEW: Accumulate coordinate outputs
+        
+        # Debug flag for diagnosing sequence generation issues
+        DEBUG_KEYPOINT_BUG = os.environ.get('DEBUG_KEYPOINT_BUG', '0') == '1'
+        if DEBUG_KEYPOINT_BUG and bs > 0:
+            print(f"\n[DEBUG_KEYPOINT_BUG] Starting autoregressive generation:")
+            print(f"  Batch size: {bs}")
+            print(f"  Max sequence length: {max_len}")
+            print(f"  Min sequence length: {min_len}")
+        
         while i < max_len and unfinish_flag.any():
             prev_output_tokens_11_tensor = torch.tensor(np.array(prev_output_token_11)[:, i:i+1]).to(device).long()
             prev_output_tokens_12_tensor = torch.tensor(np.array(prev_output_token_12)[:, i:i+1]).to(device).long()
@@ -465,6 +484,8 @@ class RoomFormerV2(nn.Module):
                                                                                     enc_cache=None, decode_token_pos=None,
                                                                                     support_features=support_embeddings)
                 output_hs_list.append(hs[:, i:i+1])
+                output_cls_list.append(cls_output)  # ← NEW: Accumulate classifications
+                output_reg_list.append(reg_output)  # ← NEW: Accumulate coordinates
             else:
                 decode_token_pos = torch.tensor([i], device=device, dtype=torch.long)
                 hs, _, reg_output, cls_output, enc_cache = self.transformer(srcs, masks, pos, query_embeds, tgt_embeds, None, 
@@ -472,8 +493,17 @@ class RoomFormerV2(nn.Module):
                                                                                     enc_cache=enc_cache, decode_token_pos=decode_token_pos,
                                                                                     support_features=support_embeddings)
                 output_hs_list.append(hs)
+                output_cls_list.append(cls_output)  # ← NEW: Accumulate classifications
+                output_reg_list.append(reg_output)  # ← NEW: Accumulate coordinates
             cls_type = torch.argmax(cls_output, 2)
             # print(cls_type, torch.softmax(cls_output, dim=2)[:, :, cls_type], torch.topk(torch.softmax(cls_output, dim=2), k=3))
+            
+            # Debug: Log token types for first sample at first 10 steps
+            if DEBUG_KEYPOINT_BUG and i < 10 and bs > 0:
+                cls_0 = cls_type[0, 0].item()
+                token_name = {0: 'COORD', 1: 'SEP', 2: 'CLS', 3: 'EOS', 4: 'PAD'}.get(cls_0, f'UNKNOWN({cls_0})')
+                print(f"  Step {i}: Predicted token type = {token_name}")
+            
             for j in range(bs):
                 if unfinish_flag[j] == 1:  # prediction is not finished
                     cls_j = cls_type[j, 0].item()
@@ -544,16 +574,59 @@ class RoomFormerV2(nn.Module):
                 delta_y2[j].append(1 - delta_y)
             i += 1
         
-        out = {'pred_logits': cls_output, 'pred_coords': reg_output, 'gen_out': gen_out}
+        # ========================================================================
+        # CRITICAL FIX: Concatenate accumulated outputs to return FULL sequence
+        # ========================================================================
+        # BUG: Previously returned only the LAST cls_output and reg_output
+        # FIX: Concatenate all accumulated outputs across iterations
+        # ========================================================================
+        if len(output_cls_list) > 0:
+            # Concatenate along sequence dimension
+            # Each element in list is (B, 1, vocab_size) or (B, 1, 2)
+            # Result should be (B, seq_len, vocab_size) or (B, seq_len, 2)
+            all_cls_output = torch.cat(output_cls_list, dim=1)  # (B, seq_len, vocab_size)
+            all_reg_output = torch.cat(output_reg_list, dim=1)  # (B, seq_len, 2)
+            
+            # Debug: Log final shapes
+            if DEBUG_KEYPOINT_BUG and bs > 0:
+                print(f"\n[DEBUG_KEYPOINT_BUG] Generation complete:")
+                print(f"  Total iterations: {i}")
+                print(f"  gen_out[0] length: {len(gen_out[0])}")
+                print(f"  all_cls_output shape: {all_cls_output.shape}")
+                print(f"  all_reg_output shape: {all_reg_output.shape}")
+                print(f"  First sample finished: {unfinish_flag[0] == 0}")
+        else:
+            # Fallback if no iterations (shouldn't happen but be safe)
+            all_cls_output = None
+            all_reg_output = None
+            if DEBUG_KEYPOINT_BUG:
+                print(f"\n[DEBUG_KEYPOINT_BUG] WARNING: No iterations! output_cls_list is empty")
+        
+        out = {'pred_logits': all_cls_output, 'pred_coords': all_reg_output, 'gen_out': gen_out}
 
         # hack implementation of room label prediction, not compatible with auxiliary loss
         if self.room_class_embed is not None:
             # outputs_room_class = self.room_class_embed(hs[-1].view(bs, hs[-1].size[1], self.num_queries_per_poly, -1).mean(axis=2))
             hs = torch.cat(output_hs_list, dim=1)
             outputs_room_class = self.room_class_embed(hs)
-            out = {'pred_logits': cls_output, 'pred_coords': reg_output, 
+            # CRITICAL FIX: Use accumulated outputs (all_cls_output, all_reg_output) not last iteration
+            out = {'pred_logits': all_cls_output, 'pred_coords': all_reg_output, 
                    'pred_room_logits': outputs_room_class, 'gen_out': gen_out, 
                    'anchors': query_embeds.detach()}
+        
+        # ========================================================================
+        # SANITY CHECK: Verify outputs match gen_out length (detect future regressions)
+        # ========================================================================
+        if out['pred_coords'] is not None and len(gen_out) > 0:
+            actual_len = out['pred_coords'].shape[1]
+            expected_len = len(gen_out[0])
+            if actual_len != expected_len:
+                raise RuntimeError(
+                    f"CRITICAL BUG DETECTED: forward_inference output shape mismatch!\n"
+                    f"  Generated {expected_len} tokens in gen_out\n"
+                    f"  But pred_coords only has {actual_len} positions\n"
+                    f"  This indicates the output accumulation is broken."
+                )
 
         return out
 

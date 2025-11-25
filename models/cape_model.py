@@ -222,8 +222,11 @@ class CAPEModel(nn.Module):
             outputs = self.base_model(samples, seq_kwargs=targets)
 
         # Clean up stored references
+        # CRITICAL: Must clean up ALL temporary attributes to avoid state_dict contamination
         self.base_model.transformer.decoder.support_features = None
         self.base_model.transformer.decoder.support_mask = None
+        self.base_model.transformer.decoder.support_cross_attn_layers = None
+        self.base_model.transformer.decoder.support_attn_norms = None
 
         return outputs
 
@@ -329,8 +332,11 @@ class CAPEModel(nn.Module):
                 )
 
             # Clean up decoder attributes after generation
+            # CRITICAL: Must clean up ALL temporary attributes to avoid state_dict contamination
             self.base_model.transformer.decoder.support_features = None
             self.base_model.transformer.decoder.support_mask = None
+            self.base_model.transformer.decoder.support_cross_attn_layers = None
+            self.base_model.transformer.decoder.support_attn_norms = None
 
         # 3. Extract predictions from autoregressive outputs
         # The base model's forward_inference returns:

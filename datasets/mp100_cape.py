@@ -54,29 +54,18 @@ except ImportError:
             return self.vocab_size
 
         def convert_to_sequence(self, coords, add_eos=True, add_sep_between_polygons=False):
-            # Simple quantization: scale coords to vocab bins
-            bins = int(np.sqrt(self.vocab_size / 2))
-            quantized = (coords * bins).astype(int).clip(0, bins-1)
-
-            # ========================================================================
-            # CRITICAL FIX: Remove duplicate sequences (Issue #18)
-            # ========================================================================
-            # OLD: seq11 == seq21 and seq12 == seq22 (duplicates waste memory/compute)
-            # NEW: Only keep seq11 (x) and seq12 (y), remove seq21 and seq22
-            #
-            # These duplicates were for compatibility with an older model architecture
-            # that used 4 separate decoders. For CAPE, we use a unified decoder,
-            # so duplicates are unnecessary and waste resources.
-            # ========================================================================
+            """
+            DEPRECATED/UNUSED: This is a placeholder method from the original codebase.
             
-            # Return dict with tokenized data (no duplicates)
-            seq_dict = {
-                'seq11': quantized[:, 0],  # x coordinates
-                'seq12': quantized[:, 1],  # y coordinates
-                'delta_x1': np.ones_like(quantized[:, 0]) * 0.5,
-                'delta_y1': np.ones_like(quantized[:, 1]) * 0.5,
-            }
-            return seq_dict
+            The actual tokenization for CAPE is done in _tokenize_keypoints() which
+            properly implements bilinear interpolation with all 4 sequences (seq11,
+            seq21, seq12, seq22) and their corresponding deltas.
+            
+            This method is kept for backwards compatibility but should NOT be used.
+            """
+            raise NotImplementedError(
+                "convert_to_sequence is deprecated. Use _tokenize_keypoints() instead."
+            )
 
 # Always import the real tokenizer (it's always available)
 from datasets.discrete_tokenizer import DiscreteTokenizer, DiscreteTokenizerV2

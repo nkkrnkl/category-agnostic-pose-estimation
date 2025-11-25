@@ -308,6 +308,12 @@ class EpisodicDataset(data.Dataset):
                     'support_bbox': support_data.get('bbox', [0, 0, support_data['width'], support_data['height']]),
                     'support_bbox_width': support_data.get('bbox_width', support_data['width']),
                     'support_bbox_height': support_data.get('bbox_height', support_data['height']),
+                    'support_metadata': {
+                        'image_id': support_data['image_id'],
+                        'category_id': support_data['category_id'],
+                        'bbox_width': support_data.get('bbox_width', support_data['width']),
+                        'bbox_height': support_data.get('bbox_height', support_data['height']),
+                    },
                     'query_images': query_images,
                     'query_targets': query_targets,
                     'query_metadata': query_metadata,
@@ -343,6 +349,7 @@ def episodic_collate_fn(batch):
     support_coords_list = []
     support_masks = []
     support_skeletons = []
+    support_metadata_list = []  # NEW: Collect support metadata for debugging
     query_images_list = []
     query_targets_list = []
     query_metadata_list = []  # NEW: Collect query metadata
@@ -353,6 +360,7 @@ def episodic_collate_fn(batch):
         support_coords_list.append(episode['support_coords'])
         support_masks.append(episode['support_mask'])
         support_skeletons.append(episode['support_skeleton'])
+        support_metadata_list.append(episode.get('support_metadata', {}))  # NEW: Extract support metadata
         query_images_list.extend(episode['query_images'])
         query_targets_list.extend(episode['query_targets'])
         query_metadata_list.extend(episode['query_metadata'])  # NEW: Extract query metadata
@@ -419,6 +427,11 @@ def episodic_collate_fn(batch):
     support_masks = support_masks.repeat_interleave(queries_per_episode, dim=0)  # (B*K, max_kpts)
     support_images = support_images.repeat_interleave(queries_per_episode, dim=0)  # (B*K, C, H, W)
     
+    # Repeat support metadata (list) K times
+    support_metadata_repeated = []
+    for meta in support_metadata_list:
+        support_metadata_repeated.extend([meta] * queries_per_episode)  # Repeat K times
+    
     # ========================================================================
     # ALREADY FIXED (Issue #11): Category IDs repeated per query
     # ========================================================================
@@ -459,6 +472,7 @@ def episodic_collate_fn(batch):
         'support_coords': support_coords,  # (B*K, max_kpts, 2)
         'support_masks': support_masks,    # (B*K, max_kpts)
         'support_skeletons': support_skeletons_repeated,  # List of B*K skeleton edge lists
+        'support_metadata': support_metadata_repeated,  # List of B*K support metadata dicts (NEW for debugging)
         'query_images': query_images,      # (B*K, C, H, W)
         'query_targets': batched_seq_data, # Dict with tensors of shape (B*K, ...)
         'query_metadata': query_metadata_list,  # List of B*K metadata dicts

@@ -17,6 +17,14 @@ This folder contains all documentation for the Category-Agnostic Pose Estimation
 
 ### 📖 Core Concepts
 
+#### ⭐ Training & Inference Pipeline (CRITICAL - READ FIRST!)
+- **[TRAINING_INFERENCE_PIPELINE.md](TRAINING_INFERENCE_PIPELINE.md)** - 🔥 **MUST READ**: What inputs are used in training vs. inference
+- **[TRAINING_INFERENCE_IO.md](TRAINING_INFERENCE_IO.md)** - Complete technical specification with code references
+- **[AUDIT_COMPLETE_REPORT.md](AUDIT_COMPLETE_REPORT.md)** - Full audit report (20 files, 6000+ lines verified)
+- **[AUDIT_SUMMARY_Nov25_2025.md](AUDIT_SUMMARY_Nov25_2025.md)** - Executive audit summary
+- **[DEBUG_AND_TESTING_GUIDE.md](DEBUG_AND_TESTING_GUIDE.md)** - How to use debug mode and run tests
+- **[DEBUG_OVERFIT_MODE.md](DEBUG_OVERFIT_MODE.md)** - 🎯 **NEW**: Single-category overfitting for debugging
+
 #### Model Architecture
 - **[CAPE_LOSSES_REFACTORING.md](CAPE_LOSSES_REFACTORING.md)** - How CAPE extends Raster2Seq loss functions
 - **[PCK_EVALUATION_IMPLEMENTATION.md](PCK_EVALUATION_IMPLEMENTATION.md)** - PCK metric implementation details
@@ -32,6 +40,13 @@ This folder contains all documentation for the Category-Agnostic Pose Estimation
 - **[MULTI_INSTANCE_LIMITATION.md](MULTI_INSTANCE_LIMITATION.md)** - Handling multiple instances per image
 
 ### 🐛 Critical Fixes & Solutions
+
+#### 🚨 Critical Bugs (MUST READ!)
+- **[CRITICAL_SINGLE_KEYPOINT_BUG.md](CRITICAL_SINGLE_KEYPOINT_BUG.md)** - 🔥 **CRITICAL**: Single-keypoint output bug (Nov 25, 2025)
+  - **Symptom:** Model predicted only 1 keypoint instead of full sequence during inference
+  - **Root Cause:** `forward_inference` not accumulating outputs across autoregressive loop
+  - **Impact:** Blocked all evaluation, caused `PCK: N/A (TypeError)`
+  - **Status:** ✅ FIXED with regression tests and debug instrumentation
 
 #### Variable-Length Keypoints (THE BIG ONE!)
 - **[TRIMMING_LOGIC_EXPLAINED.md](TRIMMING_LOGIC_EXPLAINED.md)** - ⭐ **DEEP DIVE**: Why and how we trim predictions
@@ -107,10 +122,11 @@ These documents track fixes for specific issues identified during audits:
 4. MULTI_INSTANCE_LIMITATION.md
 
 #### **Training Pipeline**
-1. CHECKPOINT_FIXES_SUMMARY.md
-2. PCK_BASED_EARLY_STOPPING.md
-3. TQDM_PROGRESS_BARS.md
-4. TRAINING_METRICS.md
+1. DEBUG_OVERFIT_MODE.md 🎯 **NEW** - Single-category debugging
+2. CHECKPOINT_FIXES_SUMMARY.md
+3. PCK_BASED_EARLY_STOPPING.md
+4. TQDM_PROGRESS_BARS.md
+5. TRAINING_METRICS.md
 
 #### **Evaluation**
 1. PCK_EVALUATION_IMPLEMENTATION.md
@@ -126,10 +142,11 @@ These documents track fixes for specific issues identified during audits:
 ### By Importance
 
 #### **⭐ Must Read**
-1. **START_HERE.md** - Project overview
-2. **TRIMMING_LOGIC_EXPLAINED.md** - Critical concept for variable-length sequences
-3. **FINAL_FIX_SUMMARY.md** - Latest bug fixes and current status
-4. **CAPE_IMPLEMENTATION_GUIDE.md** - Complete implementation guide
+1. **TRAINING_INFERENCE_PIPELINE.md** - 🔥 **CRITICAL**: Training vs. inference inputs (VERIFIED CORRECT)
+2. **START_HERE.md** - Project overview
+3. **TRIMMING_LOGIC_EXPLAINED.md** - Critical concept for variable-length sequences
+4. **FINAL_FIX_SUMMARY.md** - Latest bug fixes and current status
+5. **CAPE_IMPLEMENTATION_GUIDE.md** - Complete implementation guide
 
 #### **📖 Important**
 1. NORMALIZATION_PIPELINE_EXPLAINED.md - Understand coordinate transformations
@@ -148,11 +165,20 @@ These documents track fixes for specific issues identified during audits:
 
 ### I want to...
 
+**...understand training vs. inference inputs (CRITICAL!)**
+→ Read TRAINING_INFERENCE_PIPELINE.md first! 🔥
+
+**...verify my model can learn (debug mode)**
+→ Use DEBUG_OVERFIT_MODE.md to run single-category test! 🎯
+
 **...understand how the model works**
 → Start with CAPE_IMPLEMENTATION_GUIDE.md
 
 **...fix a training error**
 → Check FINAL_FIX_SUMMARY.md and TROUBLESHOOTING section
+
+**...understand the single-keypoint bug fix**
+→ Read CRITICAL_SINGLE_KEYPOINT_BUG.md 🚨
 
 **...understand coordinate transformations**
 → Read NORMALIZATION_PIPELINE_EXPLAINED.md
@@ -172,13 +198,22 @@ These documents track fixes for specific issues identified during audits:
 **...know what was recently fixed**
 → Check FINAL_FIX_SUMMARY.md
 
+**...debug why my model won't train**
+→ Use DEBUG_OVERFIT_MODE.md for quick diagnostics! 🎯
+
 ---
 
 ## 📅 Chronological Order (Latest First)
 
-1. **TRIMMING_LOGIC_EXPLAINED.md** - Deep dive into trimming logic
-2. **FINAL_FIX_SUMMARY.md** - Variable keypoint fix summary
-3. **VARIABLE_KEYPOINTS_FIX.md** - Variable keypoint issue resolution
+1. **CRITICAL_SINGLE_KEYPOINT_BUG.md** - Critical autoregressive bug fix (Nov 25, 2025) 🚨
+2. **DEBUG_OVERFIT_MODE.md** - Single-category debugging mode (Nov 25, 2025) 🎯
+3. **TRAINING_INFERENCE_PIPELINE.md** - Training/inference audit (Nov 25, 2025) 🔥
+4. **AUDIT_COMPLETE_REPORT.md** - Full audit verification report
+3. **TRAINING_INFERENCE_IO.md** - Complete I/O specification
+4. **DEBUG_AND_TESTING_GUIDE.md** - Debug mode and test suite
+5. **TRIMMING_LOGIC_EXPLAINED.md** - Deep dive into trimming logic
+6. **FINAL_FIX_SUMMARY.md** - Variable keypoint fix summary
+7. **VARIABLE_KEYPOINTS_FIX.md** - Variable keypoint issue resolution
 4. **TQDM_PROGRESS_BARS.md** - Progress bar integration
 5. **RESTORED_CHANGES_SUMMARY.md** - Restored appearance augmentation
 6. **MPS_FIX.md** - Apple Silicon compatibility
@@ -223,5 +258,5 @@ If you can't find what you're looking for:
 2. Use your editor's search to grep across all .md files
 3. Check **FINAL_FIX_SUMMARY.md** for recent changes
 
-Last updated: November 24, 2025
+Last updated: November 25, 2025 (Critical Single-Keypoint Bug Fixed ✅)
 

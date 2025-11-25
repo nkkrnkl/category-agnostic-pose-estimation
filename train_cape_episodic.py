@@ -56,6 +56,12 @@ def get_args_parser():
                         help='Number of episodes per training epoch')
     parser.add_argument('--category_split_file', default='category_splits.json',
                         help='Path to category split JSON file')
+    
+    # Debug / Overfitting mode (for testing model can learn)
+    parser.add_argument('--debug_overfit_category', default=None, type=int,
+                        help='DEBUG: Train on single category ID for overfitting test (ignores category_split_file)')
+    parser.add_argument('--debug_overfit_episodes', default=10, type=int,
+                        help='DEBUG: Number of episodes per epoch when using --debug_overfit_category')
 
     # Learning rate parameters
     parser.add_argument('--lr', default=1e-4, type=float)
@@ -213,9 +219,30 @@ def main(args):
     # Create output directory
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
 
-    # Build base model (RoomFormerV2)
+    # ========================================================================
+    # CRITICAL FIX: Build model with tokenizer for forward_inference
+    # ========================================================================
+    # Without tokenizer, forward_inference() crashes with AttributeError
+    # when accessing self.tokenizer.bos, causing silent fallback to teacher
+    # forcing in validation, which gives artificially high PCK@100%.
+    # ========================================================================
+    
+    # Build datasets first to get tokenizer
+    from datasets.mp100_cape import build_mp100_cape
+    
+    train_dataset = build_mp100_cape('train', args)
+    val_dataset = build_mp100_cape('val', args)
+    
+    # Get tokenizer from dataset
+    tokenizer = train_dataset.get_tokenizer()
+    print(f"Tokenizer: {tokenizer}")
+    print(f"  vocab_size: {len(tokenizer) if tokenizer else 'N/A'}")
+    print(f"  num_bins: {tokenizer.num_bins if tokenizer else 'N/A'}")
+    print()
+    
+    # Build base model (RoomFormerV2) WITH tokenizer
     print("Building base Raster2Seq model...")
-    base_model, _ = build_model(args)  # Ignore base criterion, we'll use CAPE-specific one
+    base_model, _ = build_model(args, tokenizer=tokenizer)  # Pass tokenizer for forward_inference!
 
     # Build CAPE-specific criterion with visibility masking
     print("Building CAPE-specific loss criterion...")
@@ -240,17 +267,66 @@ def main(args):
     print(f'Total trainable parameters: {n_parameters:,}')
 
     # Build base dataset (will be wrapped by episodic sampler)
-    print(f"\nBuilding MP-100 dataset...")
-    from datasets.mp100_cape import build_mp100_cape
-
-    train_dataset = build_mp100_cape('train', args)
-    val_dataset = build_mp100_cape('val', args)
-
     # Build episodic dataloaders
+    # Note: datasets already built earlier (needed for tokenizer)
     print("Creating episodic dataloaders...")
     from datasets.episodic_sampler import build_episodic_dataloader
 
+    # ========================================================================
+    # DEBUG OVERFIT MODE: Train on single category
+    # ========================================================================
+    # If --debug_overfit_category is set, override category splits to use
+    # only that single category for training. This enables quick verification
+    # that the model can overfit on a small, controlled dataset.
+    #
+    # Use case:
+    #   python train_cape_episodic.py \
+    #       --debug_overfit_category 40 \
+    #       --debug_overfit_episodes 10 \
+    #       --epochs 50 \
+    #       --output_dir outputs/debug_overfit
+    #
+    # Expected behavior:
+    #   - Training loss should drop to near-zero within ~20 epochs
+    #   - If loss doesn't decrease, indicates bug in model/data pipeline
+    # ========================================================================
     category_split_file = Path(args.dataset_root) / args.category_split_file
+    
+    if args.debug_overfit_category is not None:
+        print("\n" + "=" * 80)
+        print("⚠️  DEBUG OVERFIT MODE ENABLED")
+        print("=" * 80)
+        print(f"Training on SINGLE category: {args.debug_overfit_category}")
+        print(f"Episodes per epoch: {args.debug_overfit_episodes}")
+        print(f"Expected: Training loss → 0 within ~20 epochs")
+        print(f"Purpose: Verify model can learn (debugging tool)")
+        print("=" * 80 + "\n")
+        
+        # Override episodes_per_epoch for fast overfitting
+        args.episodes_per_epoch = args.debug_overfit_episodes
+        
+        # Create temporary category split file with only the debug category
+        import tempfile
+        temp_split = {
+            "description": f"DEBUG: Single-category overfitting mode (category {args.debug_overfit_category})",
+            "total_categories": 1,
+            "train_categories": 1,
+            "test_categories": 0,
+            "val_categories": 0,
+            "train": [args.debug_overfit_category],
+            "val": [],
+            "test": []
+        }
+        
+        # Write to temporary file
+        temp_split_fd, temp_split_path = tempfile.mkstemp(suffix='.json', text=True)
+        os.close(temp_split_fd)  # Close fd, we'll write with json.dump
+        
+        with open(temp_split_path, 'w') as f:
+            json.dump(temp_split, f, indent=2)
+        
+        category_split_file = Path(temp_split_path)
+        print(f"Using temporary category split: {category_split_file}\n")
 
     train_loader = build_episodic_dataloader(
         base_dataset=train_dataset,
@@ -325,7 +401,8 @@ def main(args):
     # CRITICAL FIX: Initialize best-model tracking and RNG state restoration
     # ========================================================================
     # These will be updated if resuming from a checkpoint
-    best_val_loss = float('inf')
+    # Note: Validation uses autoregressive inference on UNSEEN categories,
+    # so PCK is the primary metric (no validation loss)
     best_pck = 0.0
     epochs_without_improvement = 0
     
@@ -340,7 +417,25 @@ def main(args):
             checkpoint = torch.load(args.resume, map_location='cpu', weights_only=False)
             
             # Restore model, optimizer, scheduler
-            model.load_state_dict(checkpoint['model'])
+            # Use strict=False to handle state_dict contamination from old checkpoints
+            missing_keys, unexpected_keys = model.load_state_dict(checkpoint['model'], strict=False)
+            
+            # Report any key mismatches
+            if unexpected_keys:
+                # Check if these are contaminated decoder keys (from the old bug)
+                contaminated = [k for k in unexpected_keys if 'decoder.support_cross_attn' in k or 'decoder.support_attn_norm' in k]
+                if contaminated:
+                    print(f"  ⚠️  Checkpoint has {len(contaminated)} contaminated keys (from state_dict bug)")
+                    print(f"     These are duplicate support layer weights saved in wrong location")
+                    print(f"     Will be safely ignored - correct weights loaded from proper location")
+                if len(unexpected_keys) > len(contaminated):
+                    other_unexpected = len(unexpected_keys) - len(contaminated)
+                    print(f"  ⚠️  Checkpoint has {other_unexpected} other unexpected keys")
+                    print(f"     These may indicate architecture changes")
+            if missing_keys:
+                print(f"  ⚠️  Current model has {len(missing_keys)} new keys not in checkpoint")
+                print(f"     These will use freshly initialized weights")
+            
             optimizer.load_state_dict(checkpoint['optimizer'])
             lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
             args.start_epoch = checkpoint['epoch'] + 1
@@ -350,10 +445,8 @@ def main(args):
             print(f"  ✓ Will resume from epoch {args.start_epoch}")
             
             # CRITICAL: Restore best-model tracking to prevent overwriting
-            best_val_loss = checkpoint.get('best_val_loss', float('inf'))
             best_pck = checkpoint.get('best_pck', 0.0)
             epochs_without_improvement = checkpoint.get('epochs_without_improvement', 0)
-            print(f"  ✓ Best validation loss restored: {best_val_loss:.4f}")
             print(f"  ✓ Best PCK restored: {best_pck:.4f}")
             print(f"  ✓ Epochs without improvement: {epochs_without_improvement}")
             
@@ -423,9 +516,13 @@ def main(args):
         print(f"  Train Loss:       {train_stats.get('loss', 0):.4f}")
         print(f"    - Class Loss:   {train_stats.get('loss_ce', 0):.4f}")
         print(f"    - Coords Loss:  {train_stats.get('loss_coords', 0):.4f}")
-        print(f"  Val Loss:         {val_stats.get('loss', 0):.4f}")
-        print(f"    - Class Loss:   {val_stats.get('loss_ce', 0):.4f}")
-        print(f"    - Coords Loss:  {val_stats.get('loss_coords', 0):.4f}")
+        
+        # Validation uses autoregressive inference (no loss, only PCK)
+        val_pck = val_stats.get('pck', 0.0)
+        val_pck_mean = val_stats.get('pck_mean_categories', 0.0)
+        print(f"  Val PCK@0.2:      {val_pck:.2%} (autoregressive)")
+        print(f"    - Mean PCK:     {val_pck_mean:.2%} (across categories)")
+        
         print(f"  Learning Rate:    {optimizer.param_groups[0]['lr']:.6f}")
         print(f"{'=' * 80}\n")
 
@@ -468,7 +565,6 @@ def main(args):
             'val_stats': val_stats,
             
             # CRITICAL: Best-model tracking (for resume)
-            'best_val_loss': best_val_loss,
             'best_pck': best_pck,
             'epochs_without_improvement': epochs_without_improvement,
             
@@ -485,47 +581,17 @@ def main(args):
         torch.save(checkpoint_dict, checkpoint_path)
 
         # ========================================================================
-        # HIGH-PRIORITY FIX: Track and save BOTH best-loss and best-PCK models
-        # EARLY STOPPING: Based on PCK (pose estimation accuracy) not loss
+        # CRITICAL FIX: Track and save best PCK model (validation = unseen categories)
+        # EARLY STOPPING: Based on PCK on UNSEEN categories (true generalization)
         # ========================================================================
-        val_loss = val_stats.get('loss', float('inf'))
+        # Since validation now uses autoregressive inference on unseen categories,
+        # PCK is the PRIMARY metric. Loss is not computed during validation.
+        # ========================================================================
         val_pck = val_stats.get('pck', 0.0)  # Extract PCK from validation stats
-        
-        # Track best validation loss (for saving best-loss checkpoint)
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            
-            best_loss_name = (
-                f'checkpoint_best_loss_e{epoch:03d}_'
-                f'valloss{val_loss:.4f}_'
-                f'pck{val_pck:.4f}.pth'
-            )
-            best_loss_path = Path(args.output_dir) / best_loss_name
-            
-            # Save full checkpoint (same fields as regular checkpoint)
-            best_loss_dict = {
-                'model': model.state_dict(),
-                'optimizer': optimizer.state_dict(),
-                'lr_scheduler': lr_scheduler.state_dict(),
-                'epoch': epoch,
-                'args': args,
-                'val_loss': val_loss,
-                'val_pck': val_pck,
-                'best_val_loss': best_val_loss,
-                'best_pck': best_pck,
-                'epochs_without_improvement': epochs_without_improvement,
-                'rng_state': torch.get_rng_state(),
-                'np_rng_state': np.random.get_state(),
-                'py_rng_state': random.getstate(),
-            }
-            if torch.cuda.is_available():
-                best_loss_dict['cuda_rng_state'] = torch.cuda.get_rng_state_all()
-            
-            torch.save(best_loss_dict, best_loss_path)
-            print(f"  ✓ Saved BEST LOSS model (val_loss: {val_loss:.4f}, PCK: {val_pck:.4f})")
+        val_pck_mean = val_stats.get('pck_mean_categories', 0.0)
         
         # Track best PCK (for best pose estimation performance AND early stopping)
-        # CRITICAL: Early stopping based on PCK, not loss (pose accuracy is the goal!)
+        # CRITICAL: Early stopping based on PCK on UNSEEN validation categories!
         pck_improved = False
         if val_pck > best_pck:
             pck_improved = True
@@ -535,7 +601,7 @@ def main(args):
             best_pck_name = (
                 f'checkpoint_best_pck_e{epoch:03d}_'
                 f'pck{val_pck:.4f}_'
-                f'valloss{val_loss:.4f}.pth'
+                f'meanpck{val_pck_mean:.4f}.pth'
             )
             best_pck_path = Path(args.output_dir) / best_pck_name
             
@@ -546,9 +612,8 @@ def main(args):
                 'lr_scheduler': lr_scheduler.state_dict(),
                 'epoch': epoch,
                 'args': args,
-                'val_loss': val_loss,
                 'val_pck': val_pck,
-                'best_val_loss': best_val_loss,
+                'val_pck_mean': val_pck_mean,
                 'best_pck': best_pck,
                 'epochs_without_improvement': epochs_without_improvement,
                 'rng_state': torch.get_rng_state(),
@@ -559,15 +624,16 @@ def main(args):
                 best_pck_dict['cuda_rng_state'] = torch.cuda.get_rng_state_all()
             
             torch.save(best_pck_dict, best_pck_path)
-            print(f"  ✓ Saved BEST PCK model (PCK: {val_pck:.4f}, val_loss: {val_loss:.4f})")
+            print(f"  ✓ Saved BEST PCK model (PCK: {val_pck:.4f}, Mean PCK: {val_pck_mean:.4f})")
         
         # Report progress (early stopping based on PCK)
         if not pck_improved:
-            # No improvement in PCK (pose accuracy)
+            # No improvement in PCK (pose accuracy on unseen categories)
             epochs_without_improvement += 1
             print(f"  → No improvement in PCK for {epochs_without_improvement} epoch(s)")
-            print(f"     Best PCK:  {best_pck:.4f} | Current: {val_pck:.4f}")
-            print(f"     Best loss: {best_val_loss:.4f} | Current: {val_loss:.4f}")
+            print(f"     Best PCK:    {best_pck:.4f}")
+            print(f"     Current PCK: {val_pck:.4f}")
+            print(f"     (on {val_stats.get('pck_num_visible', 0)} visible keypoints across unseen validation categories)")
             
             # Check early stopping (based on PCK for pose estimation)
             if args.early_stopping_patience > 0 and epochs_without_improvement >= args.early_stopping_patience:
@@ -575,7 +641,6 @@ def main(args):
                 print(f"Early stopping triggered!")
                 print(f"No improvement in PCK for {args.early_stopping_patience} epochs.")
                 print(f"Best PCK: {best_pck:.4f} (epoch {epoch - epochs_without_improvement + 1})")
-                print(f"Best validation loss: {best_val_loss:.4f}")
                 print(f"{'!' * 80}\n")
                 early_stop_triggered = True
                 break  # Exit training loop
@@ -589,12 +654,11 @@ def main(args):
         print("Training Complete!")
         print(f"Completed all {args.epochs} epochs")
     print("=" * 80)
-    print(f"Best validation loss: {best_val_loss:.4f}")
-    print(f"Best PCK:            {best_pck:.4f}")
+    print(f"Best PCK (on unseen val categories): {best_pck:.4f}")
     print(f"Checkpoints saved to: {args.output_dir}")
     print(f"\nLook for:")
-    print(f"  - checkpoint_best_loss_*.pth  (lowest validation loss)")
-    print(f"  - checkpoint_best_pck_*.pth   (highest PCK metric)")
+    print(f"  - checkpoint_best_pck_*.pth   (highest PCK on unseen categories)")
+    print(f"  - checkpoint_e***.pth         (per-epoch checkpoints)")
     if early_stop_triggered:
         print(f"\nEarly stopping saved {args.epochs - epoch - 1} epochs of compute time!")
     print("=" * 80)

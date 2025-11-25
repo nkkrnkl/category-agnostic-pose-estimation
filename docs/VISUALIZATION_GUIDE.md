@@ -1,447 +1,668 @@
-# CAPE Visualization Guide
+# 📊 CAPE Visualization Guide
 
-## 🎨 How to Visualize Your Training Results
+## Overview
 
-After training, you want to see how well your model predicts keypoints! This guide shows you multiple ways to visualize your results.
-
----
-
-## ✅ What You Have
-
-Based on your training output, you have:
-- **Checkpoints saved**: `outputs/cape_run/checkpoint_best_loss_*.pth`
-- **PCK Score**: 100% (perfect on validation!)
-- **Trained for**: 1 epoch
-- **Categories**: 69 training, 10 validation
+The visualization system allows you to visually inspect your trained CAPE model's predictions on unseen test categories. This is crucial for understanding:
+- **What the model is actually predicting**
+- **How well 1-shot conditioning works**
+- **Which categories/keypoints are difficult**
+- **Whether predictions are anatomically plausible**
 
 ---
 
-## 🎯 Option 1: Use the Existing Visualization Script (RECOMMENDED)
+## 🎯 What Gets Visualized
 
-You already have `visualize_cape_predictions.py` which is perfect for this!
+### Input to Model (1-Shot CAPE)
+For each test category:
+1. **Support Image** (template): One image with ground truth keypoints
+2. **Query Image** (to predict): Different image from same category
+3. **Skeleton Structure**: Edge connectivity for the category
 
-### **Quick Start**
+### Output Visualization (Side-by-Side)
+
+```
+┌─────────────────────────────────┬─────────────────────────────────┐
+│  Support Template               │  Query Image - Predicted Pose   │
+│  beaver_body                    │  17 keypoints | PCK@0.2: 45.2%  │
+│                                 │                                 │
+│  [Support Image]                │  [Query Image]                  │
+│                                 │                                 │
+│  ● ──── ● Green circles         │  ● ──── ● Cyan circles (GT)     │
+│  │      │ (support GT)          │  ✗ ──── ✗ Red X's (predicted)  │
+│  ● ──── ● Numbered 1,2,3...     │  │      │ Numbered 1,2,3...     │
+│                                 │                                 │
+└─────────────────────────────────┴─────────────────────────────────┘
+```
+
+**Left Panel:** Support image with ground truth keypoints (green)
+**Right Panel:** Query image with:
+- **Red X's**: Model predictions (autoregressive inference)
+- **Cyan circles**: Ground truth (for comparison only)
+- **PCK score**: Percentage of correct keypoints
+
+---
+
+## 🚀 Quick Start
+
+### Option 1: Use Convenience Script (Recommended)
 
 ```bash
-source venv/bin/activate
+# Visualize best PCK checkpoint (3 samples per category)
+./run_visualization.sh
 
-# Visualize test set predictions
+# Visualize with 5 samples per category
+./run_visualization.sh "outputs/cape_run/checkpoint_best_pck*.pth" 5
+
+# Visualize specific epoch
+./run_visualization.sh outputs/cape_run/checkpoint_e050_*.pth 5
+```
+
+### Option 2: Direct Python Command
+
+```bash
+# Activate venv first
+source activate_venv.sh
+
+# Visualize best model
 python visualize_cape_predictions.py \
-    --checkpoint outputs/cape_run/checkpoint_best_loss_e000_valloss7.4741_pck1.0000.pth \
-    --dataset_root . \
-    --split_id 1 \
+    --checkpoint outputs/cape_run/checkpoint_best_pck_e050_pck0.4567.pth \
+    --device mps \
     --num_samples 5 \
-    --output_dir visualizations/test_predictions \
-    --device mps
-```
+    --output_dir visualizations/best_model
 
-### **What It Does**
-
-1. ✅ Loads your trained checkpoint
-2. ✅ Runs inference on **test images** (unseen categories!)
-3. ✅ Creates side-by-side visualizations:
-   - **Left**: Support pose template with keypoints + skeleton
-   - **Right**: Query image with predicted keypoints + skeleton
-4. ✅ Saves images to `visualizations/test_predictions/`
-
-### **Output**
-
-You'll get images like:
-```
-beaver_body_sample_123.png
-cat_face_sample_456.png
-horse_body_sample_789.png
-...
-```
-
-Each shows:
-- Support keypoints (green) with numbered labels
-- Predicted keypoints (red) with numbered labels
-- Skeleton connections (if available)
-
----
-
-## 🔍 Option 2: Visualize Validation Set (See What PCK Saw)
-
-To see the exact images used during validation (the ones that got 100% PCK):
-
-```bash
+# Visualize specific categories only
 python visualize_cape_predictions.py \
-    --checkpoint outputs/cape_run/checkpoint_best_loss_e000_valloss7.4741_pck1.0000.pth \
-    --dataset_root . \
-    --split_id 1 \
-    --num_samples 3 \
-    --output_dir visualizations/val_predictions \
-    --device mps
+    --checkpoint outputs/cape_run/checkpoint_best_pck_*.pth \
+    --device mps \
+    --categories 40 55 68 \
+    --num_samples 3
 ```
-
-**Note**: The script loads the test set by default, but you can modify it to load the val set.
 
 ---
 
-## 📊 Option 3: Create a Comparison Grid (BEST FOR ANALYSIS)
+## 📋 Command-Line Arguments
 
-For a more detailed analysis, you can create a grid showing:
-- Ground truth keypoints
-- Predicted keypoints
-- Error magnitude per keypoint
+### Required Arguments
 
-### **Create a Custom Visualization Script**
+| Argument | Description | Example |
+|----------|-------------|---------|
+| `--checkpoint` | Path to trained CAPE checkpoint | `outputs/cape_run/checkpoint_best_pck_e050.pth` |
 
-Save this as `visualize_comparison.py`:
+### Optional Arguments
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--device` | `cpu` | Device for inference: `cpu`, `cuda`, or `mps` |
+| `--dataset_root` | `.` | Path to MP-100 dataset root |
+| `--split_id` | `1` | MP-100 split ID (1-5), must match training |
+| `--num_samples` | `3` | Number of samples per category |
+| `--output_dir` | `visualizations/` | Where to save output images |
+| `--categories` | All test cats | Specific category IDs to visualize |
+
+---
+
+## 🔍 How It Works (Technical Details)
+
+### Step 1: Load Trained Model
 
 ```python
-#!/usr/bin/env python3
-"""
-Enhanced visualization with GT vs Predicted comparison
-"""
+checkpoint = torch.load(checkpoint_path)
+train_args = checkpoint['args']  # Get original training config
+model = build_cape_model(train_args, ...)
+model.load_state_dict(checkpoint['model'], strict=False)
+model.eval()
+```
 
-import torch
-import numpy as np
-import matplotlib.pyplot as plt
-from pathlib import Path
+- Loads checkpoint (e.g., `checkpoint_best_pck_e050.pth`)
+- Extracts saved training arguments (architecture, vocab size, etc.)
+- Rebuilds exact same model
+- Loads trained weights
+- Sets to evaluation mode
 
-from models.roomformer_v2 import build as build_base_model
-from models.cape_model import build_cape_model
-from datasets.mp100_cape import build_mp100_cape, ImageNotFoundError
-from datasets.episodic_sampler import build_episodic_dataloader
+### Step 2: Load Test Dataset
 
+```python
+dataset = build_mp100_cape('test', train_args)
+```
 
-def visualize_comparison(args):
-    """Create GT vs Pred comparison visualizations."""
-    
-    # Load checkpoint
-    checkpoint = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
-    train_args = checkpoint['args']
-    train_args.dataset_root = args.dataset_root
-    
-    # Build model
-    build_result = build_base_model(train_args)
-    base_model = build_result[0] if isinstance(build_result, tuple) else build_result
-    model = build_cape_model(train_args, base_model)
-    model.load_state_dict(checkpoint['model'], strict=False)
-    model.eval()
-    
-    device = torch.device(args.device)
-    model = model.to(device)
-    
-    # Load validation dataset
-    val_dataset = build_mp100_cape('val', train_args)
-    val_loader = build_episodic_dataloader(
-        base_dataset=val_dataset,
-        category_split_file='category_splits.json',
-        split='val',
-        batch_size=1,
-        num_queries_per_episode=1,
-        episodes_per_epoch=10,
-        num_workers=0,
-        seed=42
+- Loads **test split** (20 unseen categories)
+- Categories the model has **NEVER seen during training**
+- Examples: `przewalskihorse_face`, `beaver_body`, `kangaroo_body`
+
+### Step 3: For Each Category, Sample Episodes
+
+```python
+support_data = dataset[support_idx]  # First image (template)
+query_data = dataset[query_idx]      # Other images (to predict)
+```
+
+**Support (Template):**
+- First valid image in category
+- Extracts ground truth keypoints
+- Extracts skeleton structure
+- Used as **1-shot conditioning**
+
+**Query (To Predict):**
+- Different images from same category
+- Model must predict their keypoints
+- Ground truth used only for PCK computation
+
+### Step 4: Run Autoregressive Inference
+
+```python
+with torch.no_grad():
+    predictions = model.forward_inference(
+        samples=query_image,           # Query to predict
+        support_coords=support_kpts,   # Support GT (conditioning)
+        support_mask=support_mask,     # Which keypoints visible
+        skeleton_edges=[skeleton]      # Category structure
     )
-    
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Process validation batches
-    for batch_idx, batch in enumerate(val_loader):
-        if batch_idx >= args.num_samples:
-            break
-        
-        # Move to device
-        query_images = batch['query_images'].to(device)
-        support_coords = batch['support_coords'].to(device)
-        support_mask = batch['support_mask'].to(device)
-        support_skeletons = batch['support_skeletons']
-        
-        # Get ground truth
-        gt_keypoints = batch['query_metadata'][0]['keypoints']  # (N, 2)
-        gt_visibility = batch['query_metadata'][0]['visibility']  # (N,)
-        category_id = batch['category_ids'][0].item()
-        
-        # Run inference
-        with torch.no_grad():
-            outputs = model.forward_inference(
-                samples=query_images,
-                support_coords=support_coords,
-                support_mask=support_mask,
-                skeleton_edges=support_skeletons
-            )
-        
-        # Extract predictions
-        from engine_cape import extract_keypoints_from_sequence
-        pred_coords = outputs['pred_coords']
-        token_labels = outputs['sequences']
-        mask = (token_labels != -1)
-        
-        pred_kpts = extract_keypoints_from_sequence(pred_coords, token_labels, mask)
-        pred_kpts = pred_kpts[0].cpu().numpy()  # (N, 2)
-        
-        # Trim to category's keypoint count
-        num_kpts = len(gt_visibility)
-        pred_kpts = pred_kpts[:num_kpts]
-        
-        # Convert GT to numpy
-        gt_kpts = np.array(gt_keypoints)
-        gt_vis = np.array(gt_visibility)
-        
-        # Denormalize for visualization (assuming 512x512)
-        pred_kpts_vis = pred_kpts * 512
-        gt_kpts_vis = gt_kpts * 512
-        
-        # Compute errors
-        errors = np.linalg.norm(pred_kpts_vis - gt_kpts_vis, axis=1)
-        
-        # Create visualization
-        fig, axes = plt.subplots(1, 3, figsize=(18, 6))
-        
-        # Get query image
-        query_img = query_images[0].cpu().permute(1, 2, 0).numpy()
-        query_img = (query_img - query_img.min()) / (query_img.max() - query_img.min())
-        
-        # Plot 1: Ground Truth
-        axes[0].imshow(query_img)
-        axes[0].set_title(f'Ground Truth\nCategory {category_id}', fontsize=14, fontweight='bold')
-        axes[0].axis('off')
-        
-        # Plot GT keypoints
-        visible_mask = gt_vis > 0
-        axes[0].scatter(gt_kpts_vis[visible_mask, 0], gt_kpts_vis[visible_mask, 1],
-                       c='lime', s=100, marker='o', edgecolors='black', linewidths=2,
-                       label=f'Visible ({visible_mask.sum()})', zorder=3)
-        
-        if not visible_mask.all():
-            axes[0].scatter(gt_kpts_vis[~visible_mask, 0], gt_kpts_vis[~visible_mask, 1],
-                           c='gray', s=100, marker='x', linewidths=2,
-                           label=f'Invisible ({(~visible_mask).sum()})', zorder=2)
-        
-        axes[0].legend(loc='upper right')
-        
-        # Plot 2: Predictions
-        axes[1].imshow(query_img)
-        axes[1].set_title(f'Predictions\n{len(pred_kpts)} keypoints', fontsize=14, fontweight='bold')
-        axes[1].axis('off')
-        
-        axes[1].scatter(pred_kpts_vis[:, 0], pred_kpts_vis[:, 1],
-                       c='red', s=100, marker='x', linewidths=3,
-                       label='Predicted', zorder=3)
-        axes[1].legend(loc='upper right')
-        
-        # Plot 3: Error Heatmap
-        axes[2].imshow(query_img, alpha=0.5)
-        axes[2].set_title(f'Prediction Errors\nMean: {errors[visible_mask].mean():.1f}px', 
-                         fontsize=14, fontweight='bold')
-        axes[2].axis('off')
-        
-        # Draw error vectors (GT -> Pred)
-        for i, (gt_pt, pred_pt, err, vis) in enumerate(zip(gt_kpts_vis, pred_kpts_vis, errors, gt_vis)):
-            if vis > 0:  # Only for visible keypoints
-                # Draw error vector
-                axes[2].arrow(gt_pt[0], gt_pt[1],
-                            pred_pt[0] - gt_pt[0], pred_pt[1] - gt_pt[1],
-                            head_width=5, head_length=5, fc='red', ec='red', alpha=0.7,
-                            linewidth=2)
-                
-                # GT point
-                axes[2].scatter(gt_pt[0], gt_pt[1], c='lime', s=80, marker='o',
-                              edgecolors='black', linewidths=2, zorder=3)
-                
-                # Pred point
-                axes[2].scatter(pred_pt[0], pred_pt[1], c='red', s=80, marker='x',
-                              linewidths=2, zorder=3)
-                
-                # Error label
-                axes[2].text(pred_pt[0], pred_pt[1]-15, f'{err:.0f}px',
-                           color='white', fontsize=8, ha='center',
-                           bbox=dict(boxstyle='round,pad=0.3', facecolor='red', alpha=0.7))
-        
-        # Add colorbar legend
-        from matplotlib.patches import Patch
-        legend_elements = [
-            Patch(facecolor='lime', edgecolor='black', label='Ground Truth'),
-            Patch(facecolor='red', label='Predicted'),
-            Patch(facecolor='red', alpha=0.5, label='Error Vector')
-        ]
-        axes[2].legend(handles=legend_elements, loc='upper right')
-        
-        plt.tight_layout()
-        save_path = output_dir / f'comparison_batch{batch_idx:03d}_cat{category_id}.png'
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        plt.close()
-        
-        print(f"✓ Saved: {save_path}")
-        print(f"  Mean error: {errors[visible_mask].mean():.2f}px (visible keypoints only)")
-        print(f"  Max error: {errors[visible_mask].max():.2f}px")
-        print()
-    
-    print(f"\n✓ Saved {args.num_samples} comparison visualizations to {output_dir}")
-
-
-if __name__ == '__main__':
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--checkpoint', required=True)
-    parser.add_argument('--dataset_root', default='.')
-    parser.add_argument('--num_samples', type=int, default=10)
-    parser.add_argument('--output_dir', default='visualizations/comparisons')
-    parser.add_argument('--device', default='mps')
-    args = parser.parse_args()
-    
-    visualize_comparison(args)
 ```
 
-### **Run It**
+**Model receives:**
+1. Query image (RGB)
+2. Support keypoints (normalized [0,1])
+3. Support mask (bool tensor)
+4. Skeleton edges (connectivity graph)
 
-```bash
-python visualize_comparison.py \
-    --checkpoint outputs/cape_run/checkpoint_best_loss_e000_valloss7.4741_pck1.0000.pth \
-    --num_samples 20 \
-    --output_dir visualizations/error_analysis
-```
+**Model does:**
+1. Starts from BOS token
+2. Autoregressively generates keypoint sequence
+3. Uses support as reference/template
+4. Outputs predicted keypoints
 
-This creates **3-panel visualizations**:
-1. **Ground Truth**: Shows which keypoints are visible/invisible
-2. **Predictions**: Shows what the model predicted
-3. **Error Heatmap**: Shows error vectors (GT → Pred) with pixel distances
-
----
-
-## 📈 Option 4: Quick Stats Summary
-
-To get quick statistics without visualizations:
+### Step 5: Compute PCK and Visualize
 
 ```python
-# Add to visualize_comparison.py or run separately
-def print_stats(checkpoint_path):
-    """Print quick stats about model performance."""
-    checkpoint = torch.load(checkpoint_path, weights_only=False)
-    
-    print("="*60)
-    print("CHECKPOINT STATS")
-    print("="*60)
-    print(f"Epoch: {checkpoint['epoch']}")
-    print(f"Best Val Loss: {checkpoint.get('best_val_loss', 'N/A')}")
-    print(f"Best PCK: {checkpoint.get('best_pck', 'N/A')}")
-    print(f"Learning Rate: {checkpoint['args'].lr}")
-    print(f"Batch Size: {checkpoint['args'].batch_size}")
-    print(f"Queries/Episode: {checkpoint['args'].num_queries_per_episode}")
-    print("="*60)
+pck_score = compute_pck_bbox(
+    pred_keypoints=predictions,
+    gt_keypoints=query_gt,
+    bbox_width=bbox_w,
+    bbox_height=bbox_h,
+    visibility=visibility,
+    threshold=0.2
+)
+
+visualize_pose_prediction(
+    support_image=support_img,
+    query_image=query_img,
+    pred_keypoints=predictions,
+    support_keypoints=support_kpts,
+    gt_keypoints=query_gt,
+    pck_score=pck_score
+)
 ```
+
+Saves visualization showing:
+- Support template (left)
+- Query predictions vs GT (right)
+- PCK score in title
 
 ---
 
-## 🎯 Recommended Workflow
+## 📈 Interpreting Results
 
-### **Step 1: Quick Check (Test Set)**
+### Good Predictions (High PCK)
+
+```
+PCK@0.2: 85%
+```
+
+**What you'll see:**
+- Red X's (predictions) closely overlap cyan circles (GT)
+- Skeleton structure looks anatomically correct
+- All major keypoints captured
+- Minor errors in fine details (ears, tails, etc.)
+
+**Interpretation:**
+- Model learned good representations
+- Support conditioning is effective
+- Category structure well understood
+
+### Moderate Predictions (Medium PCK)
+
+```
+PCK@0.2: 40-60%
+```
+
+**What you'll see:**
+- Some keypoints correct (head, body)
+- Others off (limbs, extremities)
+- Skeleton roughly correct but details wrong
+- Predictions in plausible locations
+
+**Interpretation:**
+- Model captures high-level structure
+- Struggles with fine-grained localization
+- May need more training or better support
+
+### Poor Predictions (Low PCK)
+
+```
+PCK@0.2: <20%
+```
+
+**What you'll see:**
+- Keypoints in wrong locations
+- Skeleton structure broken
+- Predictions clustered or nonsensical
+- No clear pose pattern
+
+**Interpretation:**
+- Model failed to generalize to this category
+- Support conditioning not effective
+- May indicate:
+  - Category too different from training
+  - Insufficient training
+  - Data quality issues
+
+---
+
+## 🎨 Visual Elements Explained
+
+### Support Panel (Left)
+
+| Element | Color | Meaning |
+|---------|-------|---------|
+| Green circles (●) | `lime` | Ground truth keypoints from support image |
+| Green lines (─) | `lime` | Skeleton edges (connectivity) |
+| Numbers (1,2,3...) | White | Keypoint indices (matches skeleton definition) |
+
+**Purpose:** Shows the 1-shot template the model uses for conditioning
+
+### Query Panel (Right)
+
+| Element | Color | Meaning |
+|---------|-------|---------|
+| Red X's (✗) | `red` | **Model predictions** (autoregressive inference) |
+| Cyan circles (●) | `cyan` | Ground truth (for comparison only) |
+| Red lines (─) | `red` | Predicted skeleton structure |
+| Cyan lines (─) | `cyan` | Ground truth skeleton structure |
+| Numbers (1,2,3...) | White | Keypoint indices |
+
+**Purpose:** Compare model predictions against ground truth
+
+---
+
+## 🔧 Troubleshooting
+
+### Issue: No visualizations generated
+
+**Check:**
+1. Dataset exists: `data/annotations/mp100_split1_test.json`
+2. Images exist: `data/{category_name}/`
+3. Checkpoint loads correctly
+
+**Solution:**
 ```bash
-# Visualize a few test samples to see general performance
+# Check dataset structure
+ls data/annotations/
+ls data/ | head -20
+
+# Try with specific categories
 python visualize_cape_predictions.py \
-    --checkpoint outputs/cape_run/checkpoint_best_loss_e000_valloss7.4741_pck1.0000.pth \
-    --dataset_root . \
-    --num_samples 3 \
-    --output_dir visualizations/quick_test
+    --checkpoint outputs/cape_run/checkpoint_best_pck_*.pth \
+    --categories 40 55  # Specify known categories
 ```
 
-### **Step 2: Detailed Analysis (Validation Set)**
+### Issue: Images not found errors
+
+**Cause:** Some MP-100 categories have missing images
+
+**Solution:** Script automatically skips missing images and reports count
+
+### Issue: CUDA/MPS errors
+
+**Solution:**
 ```bash
-# Create GT vs Pred comparisons with error vectors
-python visualize_comparison.py \
-    --checkpoint outputs/cape_run/checkpoint_best_loss_e000_valloss7.4741_pck1.0000.pth \
-    --num_samples 20 \
-    --output_dir visualizations/detailed_analysis
-```
-
-### **Step 3: Review Results**
-```bash
-# Open visualizations
-open visualizations/quick_test/
-open visualizations/detailed_analysis/
-```
-
----
-
-## 🔍 What to Look For
-
-### ✅ **Good Signs**
-- Predicted keypoints cluster near GT keypoints
-- Skeleton structure is preserved
-- Invisible keypoints are handled gracefully
-- Low pixel errors (<20px for PCK@0.2)
-
-### ⚠️ **Warning Signs**
-- Predictions far from GT (>50px)
-- Skeleton connections broken
-- All keypoints clustered in one spot (model collapse)
-- Random predictions (no structure)
-
----
-
-## 💡 Advanced: Per-Category Analysis
-
-To see which categories work well:
-
-```python
-# Modify visualize_comparison.py to track per-category stats
-category_errors = {}
-
-for batch_idx, batch in enumerate(val_loader):
-    cat_id = batch['category_ids'][0].item()
-    errors = compute_errors(gt, pred)
-    
-    if cat_id not in category_errors:
-        category_errors[cat_id] = []
-    category_errors[cat_id].append(errors.mean())
-
-# Print summary
-for cat_id, errs in sorted(category_errors.items(), key=lambda x: np.mean(x[1])):
-    print(f"Category {cat_id}: {np.mean(errs):.2f}px ± {np.std(errs):.2f}px")
-```
-
----
-
-## 📝 Summary
-
-| Method | Best For | Output |
-|--------|----------|--------|
-| **visualize_cape_predictions.py** | Quick overview of test predictions | Side-by-side images |
-| **visualize_comparison.py** | Detailed error analysis | 3-panel with error vectors |
-| **Stats summary** | Quick performance check | Console output |
-
----
-
-## 🚀 Quick Commands
-
-```bash
-# Activate environment
-source venv/bin/activate
-
-# Basic visualization (RECOMMENDED FIRST STEP)
+# Use CPU if GPU issues
 python visualize_cape_predictions.py \
-    --checkpoint outputs/cape_run/checkpoint_best_loss_e000_valloss7.4741_pck1.0000.pth \
-    --dataset_root . \
+    --checkpoint ... \
+    --device cpu
+```
+
+### Issue: "Checkpoint has unexpected keys"
+
+**Cause:** Old checkpoints with state_dict contamination bug
+
+**Solution:** Script uses `strict=False`, so it still works (just shows warning)
+
+---
+
+## 📊 Expected Output
+
+### Console Output
+
+```
+================================================================================
+CAPE Pose Estimation Visualization
+================================================================================
+Checkpoint: outputs/cape_run/checkpoint_best_pck_e050_pck0.4567.pth
+Device: mps
+Output: visualizations/
+================================================================================
+
+Loading model from outputs/cape_run/checkpoint_best_pck_e050_pck0.4567.pth...
+  Using training config (epoch 50)
+✓ Model loaded successfully
+✓ Model loaded and moved to mps
+
+Loading MP-100 test dataset...
+✓ Loaded 1234 test images
+
+Test categories to visualize: 20
+Categories (showing first 10): ['przewalskihorse_face', 'beaver_body', ...]
+Samples per category: 3
+
+Category: beaver_body (ID: 40)
+  Sample 123: 17 keypoints predicted | PCK: 0.65
+  → Saved: visualizations/beaver_body_query123_support100.png
+  Sample 124: 17 keypoints predicted | PCK: 0.71
+  → Saved: visualizations/beaver_body_query124_support100.png
+  Sample 125: 17 keypoints predicted | PCK: 0.59
+  → Saved: visualizations/beaver_body_query125_support100.png
+
+Category: kangaroo_body (ID: 55)
+  ...
+
+================================================================================
+✓ Visualization Complete!
+================================================================================
+  Categories visualized: 20
+  Total images: 60
+  Saved to: visualizations/
+
+Visualization format:
+  - Left panel:  Support image with GT keypoints (green circles)
+  - Right panel: Query image with predicted (red X) and GT (cyan circles)
+  - PCK@0.2 score shown in title for each prediction
+================================================================================
+```
+
+### File Output
+
+```
+visualizations/
+├── beaver_body_query123_support100.png
+├── beaver_body_query124_support100.png
+├── beaver_body_query125_support100.png
+├── kangaroo_body_query456_support450.png
+├── kangaroo_body_query457_support450.png
+├── ...
+└── visualization_output.log (console output)
+```
+
+---
+
+## 💡 Tips for Analysis
+
+### 1. Compare Across Categories
+
+Look for patterns:
+- Which categories have consistently high PCK?
+- Which are difficult?
+- Do similar animals perform similarly? (e.g., all quadrupeds)
+
+### 2. Examine Failure Cases
+
+For low-PCK predictions:
+- Are all keypoints wrong or just a few?
+- Are errors systematic? (e.g., left/right flips)
+- Is the support image a good template?
+
+### 3. Check Support Quality
+
+- Is the support image representative?
+- Are keypoints clearly visible in support?
+- Does support pose match query pose orientation?
+
+### 4. Validate Against Ground Truth
+
+- Cyan circles show where keypoints SHOULD be
+- Red X's show where model THINKS they are
+- Large gaps = model error
+- Small gaps = good generalization
+
+---
+
+## 🔄 Workflow Integration
+
+### During Training
+
+**Every N epochs, visualize:**
+```bash
+# Visualize latest checkpoint
+./run_visualization.sh "outputs/cape_run/checkpoint_e050_*.pth" 3
+
+# Compare against best PCK
+./run_visualization.sh "outputs/cape_run/checkpoint_best_pck*.pth" 3
+```
+
+**What to look for:**
+- Are predictions improving over epochs?
+- Which categories improve first?
+- Are there categories that never improve?
+
+### After Training Completes
+
+```bash
+# Final visualization with more samples
+./run_visualization.sh "outputs/cape_run/checkpoint_best_pck*.pth" 10
+
+# Generate comprehensive report
+python visualize_cape_predictions.py \
+    --checkpoint outputs/cape_run/checkpoint_best_pck_*.pth \
+    --device mps \
+    --num_samples 10 \
+    --output_dir visualizations/final_results
+```
+
+### For Paper/Presentation
+
+```bash
+# Visualize specific "showcase" categories
+python visualize_cape_predictions.py \
+    --checkpoint outputs/cape_run/checkpoint_best_pck_*.pth \
+    --categories 40 55 68 72  # Hand-picked interesting categories \
     --num_samples 5 \
-    --output_dir visualizations/results
-
-# View results
-open visualizations/results/
+    --output_dir visualizations/paper_figures
 ```
 
 ---
 
-## 💭 Interpreting Your 100% PCK
+## 🧪 Debugging with Visualizations
 
-Your validation achieved **PCK@0.2 = 100%** (204/204 keypoints correct).
+### Check If Model is Learning
 
-This means:
-- ALL predicted keypoints were within 20% of bbox diagonal from GT
-- For a 100px bbox, that's within 20px
-- This is **very good** for just 1 epoch!
+**Problem:** Training loss decreases but validation PCK stays low
 
-**Next steps**:
-1. ✅ Run visualization to visually confirm
-2. ✅ Test on unseen categories (test set)
-3. ✅ Train for more epochs (currently only 1)
-4. ✅ Check if it generalizes to new categories
+**Debugging:**
+1. Visualize predictions at epoch 10, 20, 30, ...
+2. Look for gradual improvement in predictions
+3. If predictions are random → model not learning
+4. If predictions improve → just needs more epochs
+
+### Check Support Conditioning
+
+**Problem:** Model ignores support template
+
+**Debugging:**
+1. Check if predicted pose resembles support pose structure
+2. If predictions look similar across different supports → model ignoring support
+3. If predictions vary with support → conditioning works
+
+### Check Category-Specific Issues
+
+**Problem:** Some categories perform much worse
+
+**Debugging:**
+1. Visualize worst-performing categories
+2. Check if support images are good quality
+3. Check if skeleton definition makes sense
+4. May indicate data issues or category too rare
 
 ---
 
-*Happy visualizing! 🎨*
+## 📝 Output Files Explained
 
+### Filename Format
+
+```
+{category_name}_query{query_idx}_support{support_idx}.png
+```
+
+**Examples:**
+- `beaver_body_query123_support100.png`
+  - Category: beaver_body
+  - Query image index: 123
+  - Support image index: 100
+
+**Why this format:**
+- Easy to sort by category
+- Easy to identify which images were used
+- Can trace back to original dataset indices
+
+### Visualization Log
+
+```
+visualization_output.log
+```
+
+Contains:
+- Console output from visualization run
+- Any warnings or errors
+- Summary statistics
+- Useful for debugging
+
+---
+
+## 🎓 What Your PhD Mentor Will Look For
+
+### 1. Qualitative Validation
+
+**Good signs:**
+- Predictions anatomically plausible
+- Skeleton structure preserved
+- Consistent performance across similar categories
+- Clear use of support template
+
+**Red flags:**
+- Random predictions
+- Broken skeletons
+- Model ignoring support
+- Copy-pasting support onto query
+
+### 2. Category Generalization
+
+**Evidence of learning:**
+- Unseen categories still get reasonable predictions
+- Model adapts to different animal types
+- Support conditioning guides predictions
+
+**Evidence of overfitting:**
+- Good on training-like categories
+- Fails on very different categories
+- Memorization vs understanding
+
+### 3. Error Analysis
+
+**Systematic errors (fixable):**
+- Consistent left/right flips → data augmentation issue
+- Consistent scale errors → normalization issue
+- Consistent misalignment → preprocessing bug
+
+**Random errors (harder to fix):**
+- No clear pattern → model capacity or training time
+- Category-specific → data quality or quantity
+
+---
+
+## 🔬 Advanced Usage
+
+### Compare Multiple Checkpoints
+
+```bash
+# Visualize evolution of predictions
+for epoch in 010 020 030 040 050; do
+    python visualize_cape_predictions.py \
+        --checkpoint outputs/cape_run/checkpoint_e${epoch}_*.pth \
+        --categories 40 55 \
+        --num_samples 2 \
+        --output_dir visualizations/epoch_${epoch}
+done
+
+# Now compare visualizations/epoch_*/beaver_body_*.png across epochs
+```
+
+### Focus on Difficult Categories
+
+```bash
+# After identifying low-PCK categories from evaluation, visualize them:
+python visualize_cape_predictions.py \
+    --checkpoint outputs/cape_run/checkpoint_best_pck_*.pth \
+    --categories 72 83 91  # Difficult categories \
+    --num_samples 10 \
+    --output_dir visualizations/difficult_cases
+```
+
+### Generate Animation (Optional)
+
+```bash
+# After visualizing multiple epochs, create GIF:
+cd visualizations/
+for cat in beaver_body kangaroo_body; do
+    convert -delay 50 -loop 0 \
+        epoch_*/${cat}_query*_support*.png \
+        ${cat}_training_progress.gif
+done
+```
+
+---
+
+## 📚 Related Documentation
+
+- **[TRAINING_INFERENCE_IO.md](TRAINING_INFERENCE_IO.md)**: Understand model inputs/outputs
+- **[CRITICAL_FIX_VALIDATION_INFERENCE.md](../CRITICAL_FIX_VALIDATION_INFERENCE.md)**: Why validation uses autoregressive inference
+- **[VISUALIZATION_QUICK_START.md](../VISUALIZATION_QUICK_START.md)**: Simpler visualization (GT only, no model)
+
+---
+
+## 🐛 Known Issues & Fixes
+
+### Issue: Support and query from same image
+
+**Symptom:** Perfect PCK@100% for some samples
+
+**Cause:** Script checks for this now and skips
+
+**If you see this:** Update to latest `visualize_cape_predictions.py`
+
+### Issue: Missing skeleton edges
+
+**Symptom:** Keypoints shown but no connecting lines
+
+**Cause:** Some categories may have empty skeleton definitions in annotations
+
+**Solution:** This is expected for some MP-100 categories
+
+### Issue: Variable number of keypoints
+
+**Symptom:** Some predictions have more/fewer keypoints than GT
+
+**Cause:** Different categories have different keypoint counts (9 to 39)
+
+**Solution:** Script now trims predictions to match each category's actual count
+
+---
+
+## Summary
+
+**The visualization system lets you:**
+- ✅ See what the model actually predicts (not just metrics)
+- ✅ Validate that 1-shot conditioning works
+- ✅ Identify failure modes and categories
+- ✅ Debug training issues visually
+- ✅ Generate figures for papers/presentations
+
+**Key insight:**
+Looking at visualizations is often more informative than just looking at PCK numbers. A model with 40% PCK might be making plausible predictions with small errors, while another with 40% PCK might be making nonsense predictions that happen to get some keypoints right by chance.
