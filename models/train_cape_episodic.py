@@ -73,6 +73,8 @@ def get_args_parser():
                         help='DEBUG: Train on single image from specified category ID. Uses first available image from that category.')
     parser.add_argument('--debug_single_image_index', default=None, type=int,
                         help='DEBUG: Specific image index to use (within the category). If not specified, uses first image.')
+    parser.add_argument('--debug_single_image_path', default=None, type=str,
+                        help='DEBUG: Exact image file path to use (e.g., "bison_body/000000001120.jpg"). Takes precedence over --debug_single_image.')
 
     # Learning rate parameters
     parser.add_argument('--lr', default=1e-4, type=float)
@@ -420,7 +422,96 @@ def main(args):
     single_image_category = None
     single_image_idx = None
     
-    if args.debug_single_image is not None:
+    # ========================================================================
+    # PRIORITY: If --debug_single_image_path is specified, use exact file path
+    # ========================================================================
+    if args.debug_single_image_path is not None:
+        print("\n" + "=" * 80)
+        print("⚠️  DEBUG SINGLE IMAGE MODE ENABLED (by file path)")
+        print("=" * 80)
+        print(f"Training on SINGLE IMAGE with path: {args.debug_single_image_path}")
+        
+        # Find the first available image from this category
+        from datasets.mp100_cape import build_mp100_cape
+        temp_dataset = build_mp100_cape('train', args)
+        
+        # Normalize the path (remove leading/trailing slashes, handle bucket prefix)
+        image_path = args.debug_single_image_path.strip()
+        # Remove bucket prefix if present
+        if image_path.startswith('dl-category-agnostic-pose-mp100-data/'):
+            image_path = image_path.replace('dl-category-agnostic-pose-mp100-data/', '')
+        image_path = image_path.lstrip('/')
+        
+        # Find the dataset index that matches this file path
+        found_idx = None
+        for idx in range(len(temp_dataset)):
+            try:
+                img_id = temp_dataset.ids[idx]
+                img_info = temp_dataset.coco.loadImgs(img_id)[0]
+                coco_file_name = img_info['file_name']  # This is relative path like "bison_body/000000001120.jpg"
+                
+                # Check if this matches the requested path
+                if coco_file_name == image_path or coco_file_name.endswith(image_path):
+                    # Verify file exists
+                    full_path = os.path.join(temp_dataset.root, coco_file_name)
+                    if os.path.exists(full_path):
+                        found_idx = idx
+                        # Get category ID for this image
+                        ann_ids = temp_dataset.coco.getAnnIds(imgIds=img_id)
+                        anns = temp_dataset.coco.loadAnns(ann_ids)
+                        if len(anns) > 0:
+                            single_image_category = anns[0].get('category_id', 0)
+                        break
+            except Exception as e:
+                continue
+        
+        if found_idx is None:
+            # Try to construct full path and check
+            full_path = os.path.join(temp_dataset.root, image_path)
+            if os.path.exists(full_path):
+                # File exists but not in annotations - try to find by matching filename
+                filename = os.path.basename(image_path)
+                for idx in range(len(temp_dataset)):
+                    try:
+                        img_id = temp_dataset.ids[idx]
+                        img_info = temp_dataset.coco.loadImgs(img_id)[0]
+                        if os.path.basename(img_info['file_name']) == filename:
+                            found_idx = idx
+                            ann_ids = temp_dataset.coco.getAnnIds(imgIds=img_id)
+                            anns = temp_dataset.coco.loadAnns(ann_ids)
+                            if len(anns) > 0:
+                                single_image_category = anns[0].get('category_id', 0)
+                            break
+                    except:
+                        continue
+        
+        if found_idx is None:
+            raise ValueError(
+                f"Image not found: {args.debug_single_image_path}\n"
+                f"  Searched for: {image_path}\n"
+                f"  Full path checked: {os.path.join(temp_dataset.root, image_path)}\n"
+                f"  Please verify:\n"
+                f"    1. The image path is correct\n"
+                f"    2. The image exists in the data directory\n"
+                f"    3. The image is in the train annotations"
+            )
+        
+        single_image_idx = found_idx
+        single_image_mode = True
+        
+        print(f"✅ Found image at dataset index: {single_image_idx}")
+        if single_image_category is not None:
+            print(f"   Category ID: {single_image_category}")
+        print(f"   File path: {image_path}")
+        print(f"Episodes per epoch: {args.episodes_per_epoch}")
+        print(f"Expected: Training loss → 0 within ~10 epochs")
+        print(f"Purpose: Extreme overfitting test on single image")
+        print("=" * 80 + "\n")
+        
+        # Override episodes_per_epoch for fast overfitting
+        args.episodes_per_epoch = min(args.episodes_per_epoch, 50)  # Limit episodes for single image
+    
+    elif args.debug_single_image is not None:
         print("\n" + "=" * 80)
         print("⚠️  DEBUG SINGLE IMAGE MODE ENABLED")
         print("=" * 80)
@@ -430,7 +521,7 @@ def main(args):
         from datasets.mp100_cape import build_mp100_cape
         temp_dataset = build_mp100_cape('train', args)
         
-        # Find images from this category
+        # Find images from this category AND verify they exist
         category_images = []
         for idx in range(len(temp_dataset)):
             try:
@@ -440,20 +531,31 @@ def main(args):
                 if len(anns) > 0:
                     cat_id = anns[0].get('category_id', 0)
                     if cat_id == args.debug_single_image:
-                        category_images.append(idx)
-            except:
+                        # Verify image file actually exists
+                        img_info = temp_dataset.coco.loadImgs(img_id)[0]
+                        path = img_info['file_name']
+                        file_name = os.path.join(temp_dataset.root, path)
+                        if os.path.exists(file_name):
+                            category_images.append(idx)
+                        else:
+                            print(f"  ⚠️  Skipping image {idx} (file not found: {file_name})")
+            except Exception as e:
                 continue
         
         if len(category_images) == 0:
-            raise ValueError(f"No images found for category {args.debug_single_image}")
+            raise ValueError(
+                f"No images found for category {args.debug_single_image} with existing files. "
+                f"Please check that the data directory is properly mounted and contains image files."
+            )
         
         # Select image index
         if args.debug_single_image_index is not None:
             if args.debug_single_image_index >= len(category_images):
                 raise ValueError(f"Image index {args.debug_single_image_index} out of range. "
-                               f"Category {args.debug_single_image} has {len(category_images)} images.")
+                               f"Category {args.debug_single_image} has {len(category_images)} images with existing files.")
             single_image_idx = category_images[args.debug_single_image_index]
         else:
+            # Use first available image that exists
             single_image_idx = category_images[0]
         
         single_image_category = args.debug_single_image

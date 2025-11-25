@@ -197,8 +197,16 @@ class EpisodicDataset(data.Dataset):
         # SINGLE IMAGE MODE: Use the same image as both support and query
         # ========================================================================
         if self.debug_single_image is not None:
-            # Load the single image
-            image_data = self.base_dataset[self.debug_single_image]
+            # Load the single image (with error handling)
+            try:
+                image_data = self.base_dataset[self.debug_single_image]
+            except ImageNotFoundError as e:
+                # If image doesn't exist, raise a clearer error
+                raise ImageNotFoundError(
+                    f"Single image mode: Image at index {self.debug_single_image} not found. "
+                    f"Original error: {e}. "
+                    f"Please check that the image file exists in the data directory."
+                )
             
             # Use same image for both support and query (self-supervised)
             support_data = image_data
