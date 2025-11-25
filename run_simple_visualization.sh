@@ -17,7 +17,7 @@ else
 fi
 
 # Run simple visualization (ground truth only - no model loading needed!)
-python visualize_results_simple.py \
+python -m models.visualize_results_simple \
     --mode gt \
     --dataset_root . \
     --num_samples 3 \

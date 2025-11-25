@@ -18,6 +18,7 @@ import datetime
 import json
 import random
 import os
+import sys
 import time
 from pathlib import Path
 import copy
@@ -25,6 +26,12 @@ import copy
 # Enable MPS fallback for operations not yet implemented on Apple Silicon
 # This must be set BEFORE importing torch
 os.environ.setdefault('PYTORCH_ENABLE_MPS_FALLBACK', '1')
+
+# Add parent directory to path for imports
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 import numpy as np
 import torch
@@ -36,7 +43,7 @@ from models.cape_model import build_cape_model
 from models.cape_losses import build_cape_criterion
 
 # Will create these functions below
-from engine_cape import train_one_epoch_episodic, evaluate_cape
+from models.engine_cape import train_one_epoch_episodic, evaluate_cape
 
 
 def get_args_parser():

@@ -138,7 +138,7 @@ echo "  Starting CAPE Training..."
 echo "=============================================================================="
 echo ""
 
-python3 train_cape_episodic.py \
+python3 -m models.train_cape_episodic \
     --cape_mode \
     --poly2seq \
     --dataset_name mp100 \

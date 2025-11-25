@@ -25,7 +25,7 @@ from datasets.episodic_sampler import build_episodic_dataloader
 from models import build_model
 from models.cape_model import build_cape_model
 from models.cape_losses import build_cape_criterion
-from engine_cape import evaluate_cape
+from models.engine_cape import evaluate_cape
 
 
 def test_evaluate_cape_inference_method():

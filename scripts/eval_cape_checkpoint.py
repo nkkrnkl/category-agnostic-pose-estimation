@@ -51,7 +51,7 @@ from datasets.episodic_sampler import build_episodic_dataloader
 from models import build_model
 from models.cape_model import build_cape_model
 from util.eval_utils import PCKEvaluator, compute_pck_bbox
-from engine_cape import extract_keypoints_from_sequence
+from models.engine_cape import extract_keypoints_from_sequence
 
 
 def get_args_parser():

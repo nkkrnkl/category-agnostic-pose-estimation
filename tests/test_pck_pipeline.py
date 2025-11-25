@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from util.eval_utils import compute_pck_bbox
 from util.sequence_utils import extract_keypoints_from_predictions
-from engine_cape import extract_keypoints_from_sequence
+from models.engine_cape import extract_keypoints_from_sequence
 from datasets.token_types import TokenType
 
 

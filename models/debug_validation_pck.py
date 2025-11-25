@@ -22,8 +22,11 @@ from pathlib import Path
 # Set debug mode
 os.environ['DEBUG_CAPE'] = '1'
 
-# Add project root to path
-sys.path.insert(0, str(Path(__file__).parent))
+# Add parent directory to path for imports
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 from datasets.mp100_cape import build_mp100_cape
 from datasets.episodic_sampler import build_episodic_dataloader

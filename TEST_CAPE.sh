@@ -11,7 +11,7 @@ echo "Note: Using CPU for compatibility with deformable attention"
 echo "      (MPS has issues with grid_sampler backward pass)"
 echo ""
 
-python train_cape_episodic.py \
+python -m models.train_cape_episodic \
     --cape_mode \
     --dataset_root . \
     --category_split_file category_splits.json \

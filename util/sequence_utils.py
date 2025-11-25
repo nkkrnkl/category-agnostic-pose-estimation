@@ -98,7 +98,7 @@ def extract_keypoints_from_gt_sequence(
         keypoints: Extracted keypoints, shape (B, N, 2)
     """
     # Import here to avoid circular dependency
-    from engine_cape import extract_keypoints_from_sequence
+    from models.engine_cape import extract_keypoints_from_sequence
     
     return extract_keypoints_from_sequence(
         gt_coords, token_labels, mask, max_keypoints

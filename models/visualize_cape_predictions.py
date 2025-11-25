@@ -25,7 +25,14 @@ Usage:
 # Enable MPS fallback for unsupported operations on Apple Silicon
 # This must be set BEFORE importing torch
 import os
+import sys
 os.environ.setdefault('PYTORCH_ENABLE_MPS_FALLBACK', '1')
+
+# Add parent directory to path for imports
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 import argparse
 import torch

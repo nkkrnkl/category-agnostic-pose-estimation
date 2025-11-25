@@ -28,7 +28,7 @@ if [ -d "venv" ]; then
 fi
 
 # Run overfit test
-python train_cape_episodic.py \
+python -m models.train_cape_episodic \
   --dataset_root . \
   --debug_overfit_category $CATEGORY \
   --debug_overfit_episodes 10 \

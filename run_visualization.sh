@@ -3,7 +3,7 @@
 # Usage: ./run_visualization.sh [checkpoint_path] [num_samples]
 
 # Activate virtual environment
-source activate_venv.sh
+source tools/activate_venv.sh
 
 # Default arguments
 CHECKPOINT="${1:-outputs/cape_run/checkpoint_best_pck*.pth}"
@@ -32,7 +32,7 @@ echo "==========================================================================
 echo ""
 
 # Run visualization
-python visualize_cape_predictions.py \
+python -m models.visualize_cape_predictions \
     --checkpoint "$CHECKPOINT_EXPANDED" \
     --dataset_root . \
     --device "$DEVICE" \
