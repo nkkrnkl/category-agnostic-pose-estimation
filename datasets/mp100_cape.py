@@ -867,9 +867,11 @@ def build_mp100_cape(image_set, args):
             
             # Gaussian noise: Add small random noise to image
             # Helps model be robust to sensor noise and compression artifacts
+            # Using single value for var_limit to avoid version compatibility issues
+            # (Some versions don't support tuple for var_limit)
             A.GaussNoise(
-                var_limit=(5.0, 25.0),  # Low variance to avoid corrupting image
-                p=0.4                     # Apply 40% of the time
+                var_limit=15.0,  # Mean of the desired range (5.0-25.0)
+                p=0.4            # Apply 40% of the time
             ),
             
             # Gaussian blur: Slight blur to simulate focus variations

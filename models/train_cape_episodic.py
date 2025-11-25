@@ -470,17 +470,45 @@ def main(args):
         # Normalize to forward slashes for consistency (COCO annotations use forward slashes)
         image_path = image_path.replace(os.sep, '/').lstrip('/')
         
+        # Normalize paths for comparison (handle both forward and backward slashes)
+        def normalize_path_for_comparison(path):
+            """Normalize path for comparison by converting to forward slashes and removing leading/trailing slashes"""
+            return path.replace('\\', '/').strip('/')
+        
+        image_path_normalized = normalize_path_for_comparison(image_path)
+        filename = os.path.basename(image_path)
+        
+        # Debug: Show what we're searching for
+        print(f"🔍 Searching for image:")
+        print(f"   Normalized path: {image_path_normalized}")
+        print(f"   Filename: {filename}")
+        print(f"   Dataset root: {temp_dataset.root}")
+        
+        # Check if file exists at the expected location
+        full_path_check = os.path.join(temp_dataset.root, image_path)
+        file_exists = os.path.exists(full_path_check)
+        print(f"   File exists at {full_path_check}: {file_exists}")
+        
         # Find the dataset index that matches this file path
         found_idx = None
+        sample_file_names = []  # For debugging
+        
         for idx in range(len(temp_dataset)):
             try:
                 img_id = temp_dataset.ids[idx]
                 img_info = temp_dataset.coco.loadImgs(img_id)[0]
                 coco_file_name = img_info['file_name']  # This is relative path like "bison_body/000000001120.jpg"
                 
-                # Check if this matches the requested path
-                if coco_file_name == image_path or coco_file_name.endswith(image_path):
-                    # Verify file exists
+                # Collect sample file names for debugging (first 5)
+                if len(sample_file_names) < 5:
+                    sample_file_names.append(coco_file_name)
+                
+                # Normalize COCO file name for comparison
+                coco_file_name_normalized = normalize_path_for_comparison(coco_file_name)
+                
+                # Try multiple matching strategies
+                # 1. Exact match (normalized)
+                if coco_file_name_normalized == image_path_normalized:
                     full_path = os.path.join(temp_dataset.root, coco_file_name)
                     if os.path.exists(full_path):
                         found_idx = idx
@@ -489,40 +517,87 @@ def main(args):
                         anns = temp_dataset.coco.loadAnns(ann_ids)
                         if len(anns) > 0:
                             single_image_category = anns[0].get('category_id', 0)
+                        print(f"✅ Found exact match at index {idx}: {coco_file_name}")
+                        break
+                # 2. Endswith match (handles cases where paths differ slightly)
+                elif coco_file_name_normalized.endswith(image_path_normalized) or image_path_normalized.endswith(coco_file_name_normalized):
+                    full_path = os.path.join(temp_dataset.root, coco_file_name)
+                    if os.path.exists(full_path):
+                        found_idx = idx
+                        ann_ids = temp_dataset.coco.getAnnIds(imgIds=img_id)
+                        anns = temp_dataset.coco.loadAnns(ann_ids)
+                        if len(anns) > 0:
+                            single_image_category = anns[0].get('category_id', 0)
+                        print(f"✅ Found endswith match at index {idx}: {coco_file_name}")
+                        break
+                # 3. Filename match (if path structure differs)
+                elif os.path.basename(coco_file_name) == filename:
+                    full_path = os.path.join(temp_dataset.root, coco_file_name)
+                    if os.path.exists(full_path):
+                        found_idx = idx
+                        ann_ids = temp_dataset.coco.getAnnIds(imgIds=img_id)
+                        anns = temp_dataset.coco.loadAnns(ann_ids)
+                        if len(anns) > 0:
+                            single_image_category = anns[0].get('category_id', 0)
+                        print(f"✅ Found filename match at index {idx}: {coco_file_name}")
                         break
             except Exception as e:
                 continue
         
-        if found_idx is None:
-            # Try to construct full path and check
-            full_path = os.path.join(temp_dataset.root, image_path)
-            if os.path.exists(full_path):
-                # File exists but not in annotations - try to find by matching filename
-                filename = os.path.basename(image_path)
-                for idx in range(len(temp_dataset)):
-                    try:
-                        img_id = temp_dataset.ids[idx]
-                        img_info = temp_dataset.coco.loadImgs(img_id)[0]
-                        if os.path.basename(img_info['file_name']) == filename:
-                            found_idx = idx
-                            ann_ids = temp_dataset.coco.getAnnIds(imgIds=img_id)
-                            anns = temp_dataset.coco.loadAnns(ann_ids)
-                            if len(anns) > 0:
-                                single_image_category = anns[0].get('category_id', 0)
-                            break
-                    except:
-                        continue
+        # If still not found, try direct file existence check
+        if found_idx is None and file_exists:
+            # File exists but not matched in annotations - try to find by exact filename match
+            print(f"⚠️  File exists but not matched. Trying filename-only search...")
+            for idx in range(len(temp_dataset)):
+                try:
+                    img_id = temp_dataset.ids[idx]
+                    img_info = temp_dataset.coco.loadImgs(img_id)[0]
+                    coco_file_name = img_info['file_name']
+                    if os.path.basename(coco_file_name) == filename:
+                        # Double-check the full path matches
+                        full_path = os.path.join(temp_dataset.root, coco_file_name)
+                        if os.path.exists(full_path):
+                            # Try to verify they're the same file (may fail on different filesystems)
+                            try:
+                                same_file = os.path.samefile(full_path, full_path_check)
+                            except (OSError, ValueError):
+                                # If samefile fails, just check if paths are equal (normalized)
+                                same_file = os.path.normpath(full_path) == os.path.normpath(full_path_check)
+                            
+                            if same_file:
+                                found_idx = idx
+                                ann_ids = temp_dataset.coco.getAnnIds(imgIds=img_id)
+                                anns = temp_dataset.coco.loadAnns(ann_ids)
+                                if len(anns) > 0:
+                                    single_image_category = anns[0].get('category_id', 0)
+                                print(f"✅ Found by filename and path verification at index {idx}: {coco_file_name}")
+                                break
+                except Exception as e:
+                    continue
         
         if found_idx is None:
-            raise ValueError(
+            # Provide detailed error message with debugging info
+            error_msg = (
                 f"Image not found: {args.debug_single_image_path}\n"
-                f"  Searched for: {image_path}\n"
-                f"  Full path checked: {os.path.join(temp_dataset.root, image_path)}\n"
+                f"  Searched for (normalized): {image_path_normalized}\n"
+                f"  Filename: {filename}\n"
+                f"  Full path checked: {full_path_check}\n"
+                f"  File exists: {file_exists}\n"
+            )
+            
+            if sample_file_names:
+                error_msg += f"  Sample file names in COCO annotations:\n"
+                for sample in sample_file_names[:5]:
+                    error_msg += f"    - {sample}\n"
+            
+            error_msg += (
                 f"  Please verify:\n"
                 f"    1. The image path is correct\n"
                 f"    2. The image exists in the data directory\n"
-                f"    3. The image is in the train annotations"
+                f"    3. The image is in the train annotations\n"
+                f"    4. The file_name in annotations matches the actual file path"
             )
+            raise ValueError(error_msg)
         
         single_image_idx = found_idx
         single_image_mode = True
