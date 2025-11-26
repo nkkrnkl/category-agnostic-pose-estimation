@@ -671,7 +671,7 @@ class MP100CAPE(torch.utils.data.Dataset):
         # Quantize coordinates using bilinear interpolation
         num_bins = self.tokenizer.num_bins
         quant_poly = [poly * (num_bins - 1) for poly in polygons]
-        
+
         # Clamp quantized coordinates to valid range [0, num_bins-1]
         # This prevents out-of-bounds issues when augmentation pushes coords > 1.0
         quant_poly = [np.clip(poly, 0, num_bins - 1) for poly in quant_poly]

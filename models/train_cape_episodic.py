@@ -186,6 +186,12 @@ def get_args_parser():
     parser.add_argument('--start_epoch', default=0, type=int)
     parser.add_argument('--num_workers', default=2, type=int)
     parser.add_argument('--job_name', default='cape_episodic', type=str)
+    
+    # GPU Optimizations
+    parser.add_argument('--use_amp', action='store_true',
+                        help='Use Automatic Mixed Precision (FP16/FP32) for faster training and reduced memory')
+    parser.add_argument('--cudnn_benchmark', action='store_true',
+                        help='Enable cuDNN auto-tuner to find best convolution algorithms (faster on fixed-size inputs)')
 
     # Logging
     parser.add_argument('--use_wandb', action='store_true')
@@ -264,6 +270,13 @@ def main(args):
         print(f"  GPU: {torch.cuda.get_device_name(0)}")
         print(f"  CUDA Version: {torch.version.cuda}")
         print(f"  GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
+        
+        # GPU Optimizations
+        if args.cudnn_benchmark:
+            torch.backends.cudnn.benchmark = True
+            print(f"  cuDNN benchmark: Enabled (auto-tuning convolution algorithms)")
+        if args.use_amp:
+            print(f"  Mixed Precision (AMP): Enabled (FP16/FP32 training)")
     print()
 
     # Set random seed
@@ -463,6 +476,12 @@ def main(args):
     # Learning rate scheduler
     lr_drop_epochs = [int(x) for x in args.lr_drop.split(',')]
     lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, lr_drop_epochs)
+    
+    # Mixed Precision Training (AMP)
+    scaler = None
+    if args.use_amp and device.type == 'cuda':
+        scaler = torch.cuda.amp.GradScaler()
+        print("✓ Created AMP GradScaler for mixed precision training")
 
     # ========================================================================
     # CRITICAL FIX: Initialize best-model tracking and RNG state restoration
@@ -505,6 +524,12 @@ def main(args):
             
             optimizer.load_state_dict(checkpoint['optimizer'])
             lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
+            
+            # Restore AMP scaler state if present in checkpoint
+            if scaler is not None and 'scaler' in checkpoint and checkpoint['scaler'] is not None:
+                scaler.load_state_dict(checkpoint['scaler'])
+                print(f"  ✓ AMP scaler state restored")
+            
             args.start_epoch = checkpoint['epoch'] + 1
             print(f"  ✓ Model weights restored")
             print(f"  ✓ Optimizer state restored")
@@ -571,7 +596,8 @@ def main(args):
             epoch=epoch,
             max_norm=args.clip_max_norm,
             print_freq=args.print_freq,
-            accumulation_steps=args.accumulation_steps
+            accumulation_steps=args.accumulation_steps,
+            scaler=scaler  # Pass AMP scaler (None if not using AMP)
         )
 
         lr_scheduler.step()
@@ -702,6 +728,7 @@ def main(args):
             'model': model.state_dict(),
             'optimizer': optimizer.state_dict(),
             'lr_scheduler': lr_scheduler.state_dict(),
+            'scaler': scaler.state_dict() if scaler is not None else None,
             'epoch': epoch,
             'args': args,
             

@@ -48,7 +48,8 @@ def debug_log(message, force=False):
 def train_one_epoch_episodic(model: torch.nn.Module, criterion: torch.nn.Module,
                              data_loader: Iterable, optimizer: torch.optim.Optimizer,
                              device: torch.device, epoch: int, max_norm: float = 0,
-                             print_freq: int = 10, accumulation_steps: int = 1):
+                             print_freq: int = 10, accumulation_steps: int = 1,
+                             scaler: torch.cuda.amp.GradScaler = None):
     """
     Train one epoch with episodic sampling.
 
@@ -66,6 +67,7 @@ def train_one_epoch_episodic(model: torch.nn.Module, criterion: torch.nn.Module,
         max_norm: Gradient clipping max norm
         print_freq: Print frequency
         accumulation_steps: Number of mini-batches to accumulate gradients over (default: 1, no accumulation)
+        scaler: GradScaler for mixed precision training (None = FP32 only)
 
     Returns:
         stats: Dictionary of training statistics
@@ -149,22 +151,41 @@ def train_one_epoch_episodic(model: torch.nn.Module, criterion: torch.nn.Module,
                     debug_log("  ⚠️  WARNING: Query targets match support! This may indicate a bug.")
             debug_log("=" * 80 + "\n")
 
-        # Forward pass
+        # Forward pass (with optional mixed precision)
         # Model expects query images and support conditioning (including skeleton edges)
-        outputs = model(
-            samples=query_images,
-            support_coords=support_coords,
-            support_mask=support_masks,
-            targets=query_targets,
-            skeleton_edges=support_skeletons
-        )
-
-        # Compute loss
-        loss_dict = criterion(outputs, query_targets)
-
-        # Weight losses
-        weight_dict = criterion.weight_dict
-        losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
+        # Wrap in autocast if using AMP for FP16/FP32 mixed precision
+        if scaler is not None:
+            with torch.cuda.amp.autocast():
+                outputs = model(
+                    samples=query_images,
+                    support_coords=support_coords,
+                    support_mask=support_masks,
+                    targets=query_targets,
+                    skeleton_edges=support_skeletons
+                )
+                
+                # Compute loss
+                loss_dict = criterion(outputs, query_targets)
+                
+                # Weight losses
+                weight_dict = criterion.weight_dict
+                losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
+        else:
+            # Standard FP32 training
+            outputs = model(
+                samples=query_images,
+                support_coords=support_coords,
+                support_mask=support_masks,
+                targets=query_targets,
+                skeleton_edges=support_skeletons
+            )
+            
+            # Compute loss
+            loss_dict = criterion(outputs, query_targets)
+            
+            # Weight losses
+            weight_dict = criterion.weight_dict
+            losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
 
         # Reduce losses over all GPUs for logging
         loss_dict_reduced = utils.reduce_dict(loss_dict)
@@ -202,16 +223,29 @@ def train_one_epoch_episodic(model: torch.nn.Module, criterion: torch.nn.Module,
         normalized_loss = losses / accumulation_steps
         
         # Backward pass (accumulate gradients)
-        normalized_loss.backward()
+        # Use scaler if AMP is enabled, otherwise standard backward
+        if scaler is not None:
+            scaler.scale(normalized_loss).backward()
+        else:
+            normalized_loss.backward()
         
         # Only update weights every accumulation_steps iterations
         if (batch_idx + 1) % accumulation_steps == 0:
             # Gradient clipping (applied to accumulated gradients)
             if max_norm > 0:
+                if scaler is not None:
+                    # Unscale gradients before clipping (required for AMP)
+                    scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
             
             # Update weights
-            optimizer.step()
+            if scaler is not None:
+                # AMP optimizer step with gradient scaling
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                # Standard optimizer step
+                optimizer.step()
             
             # Clear accumulated gradients
             optimizer.zero_grad()
@@ -240,8 +274,17 @@ def train_one_epoch_episodic(model: torch.nn.Module, criterion: torch.nn.Module,
     if total_batches % accumulation_steps != 0:
         print(f"  → Performing final gradient update with remaining {total_batches % accumulation_steps} accumulated batches")
         if max_norm > 0:
+            if scaler is not None:
+                # Unscale gradients before clipping (required for AMP)
+                scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
-        optimizer.step()
+        
+        # Update weights with scaler if AMP is enabled
+        if scaler is not None:
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            optimizer.step()
         optimizer.zero_grad()
 
     # Gather stats from all processes
