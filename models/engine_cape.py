@@ -665,12 +665,9 @@ def evaluate_cape(model, criterion, data_loader, device, compute_pck=True, pck_t
                         )
                     elif pred_sequences is not None:
                         # Alternative: Use predicted sequences (token IDs) if available
-                        # Convert sequences to logits-like format for extraction
+                        # Note: extract_keypoints_from_sequence is defined in this file (line 290)
                         if batch_idx == 0:
                             print("⚠️  Using predicted sequences (token IDs) for keypoint extraction")
-                        # Create one-hot-like logits from sequences
-                        # This is a workaround - ideally we'd have logits
-                        from util.sequence_utils import extract_keypoints_from_sequence
                         # Use sequences as "token labels" for extraction
                         # Note: This assumes sequences are the predicted token types
                         pred_kpts = extract_keypoints_from_sequence(
