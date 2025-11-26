@@ -129,6 +129,7 @@ def visualize_pose_prediction(support_image, query_image, pred_keypoints,
                               category_name="Unknown", pck_score=None):
     """
     Visualize predicted pose vs ground truth and support template.
+    Creates a 3-panel layout: Support (GT), Ground Truth, Predicted.
 
     Args:
         support_image: PIL Image or numpy array (H, W, 3) - support image
@@ -146,18 +147,18 @@ def visualize_pose_prediction(support_image, query_image, pred_keypoints,
     if isinstance(query_image, Image.Image):
         query_image = np.array(query_image)
 
-    # Create figure with two subplots
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 8))
+    # Create figure with three subplots
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(24, 8))
 
     support_h, support_w = support_image.shape[:2]
     query_h, query_w = query_image.shape[:2]
 
-    # Left: Support pose (template from another image)
+    # Panel 1: Support (GT) - Support image with ground truth keypoints
     ax1.imshow(support_image)
-    ax1.set_title(f"Support Template (1-Shot)\n{category_name}", fontsize=14, fontweight='bold')
+    ax1.set_title("Support (GT)", fontsize=14, fontweight='bold')
     ax1.axis('off')
 
-    # Draw support keypoints
+    # Draw support keypoints (green circles)
     if support_keypoints:
         support_kpts_array = np.array(support_keypoints)
         # Denormalize to support image size
@@ -168,7 +169,7 @@ def visualize_pose_prediction(support_image, query_image, pred_keypoints,
         
         ax1.scatter(support_kpts_array[:, 0], support_kpts_array[:, 1],
                    c='lime', s=120, marker='o', edgecolors='black', linewidths=2,
-                   label='Support Keypoints', zorder=3)
+                   label='Ground Truth', zorder=3)
 
         # Draw skeleton edges if available
         if skeleton_edges:
@@ -186,23 +187,17 @@ def visualize_pose_prediction(support_image, query_image, pred_keypoints,
                         x2, y2 = support_kpts_array[dst_idx]
                         ax1.plot([x1, x2], [y1, y2], 'lime', linewidth=2, alpha=0.6, zorder=2)
 
-        # Add keypoint numbers
-        for idx, (x, y) in enumerate(support_kpts_array):
-            ax1.text(x, y - 10, str(idx + 1), color='white', fontsize=8,
-                    ha='center', va='bottom', fontweight='bold',
-                    bbox=dict(boxstyle='round,pad=0.3', facecolor='black', alpha=0.7))
-
     ax1.legend(loc='upper right', fontsize=10)
 
-    # Right: Query image with predicted pose (and optionally GT)
-    title_text = f"Query Image - Predicted Pose\n{len(pred_keypoints)} keypoints"
+    # Panel 2: Ground Truth - Query image with ground truth keypoints only
+    title_text = "Ground Truth"
     if pck_score is not None:
-        title_text += f" | PCK@0.2: {pck_score:.1%}"
+        title_text += f"\nPCK@0.2: {pck_score:.1%}"
     ax2.set_title(title_text, fontsize=14, fontweight='bold')
     ax2.imshow(query_image)
     ax2.axis('off')
 
-    # Draw ground truth keypoints first (if available, in blue)
+    # Draw ground truth keypoints (cyan circles)
     if gt_keypoints:
         gt_kpts_array = np.array(gt_keypoints)
         # Denormalize to query image size
@@ -213,7 +208,7 @@ def visualize_pose_prediction(support_image, query_image, pred_keypoints,
         
         ax2.scatter(gt_kpts_array[:, 0], gt_kpts_array[:, 1],
                    c='cyan', s=120, marker='o', edgecolors='black', linewidths=2,
-                   label='Ground Truth', zorder=2, alpha=0.7)
+                   label='Ground Truth', zorder=2)
         
         # Draw GT skeleton
         if skeleton_edges:
@@ -228,9 +223,21 @@ def visualize_pose_prediction(support_image, query_image, pred_keypoints,
                     if 0 <= src_idx < len(gt_keypoints) and 0 <= dst_idx < len(gt_keypoints):
                         x1, y1 = gt_kpts_array[src_idx]
                         x2, y2 = gt_kpts_array[dst_idx]
-                        ax2.plot([x1, x2], [y1, y2], 'cyan', linewidth=2, alpha=0.4, zorder=1)
+                        ax2.plot([x1, x2], [y1, y2], 'cyan', linewidth=2, alpha=0.6, zorder=1)
 
-    # Draw predicted keypoints (on top)
+    ax2.legend(loc='upper right', fontsize=10)
+
+    # Panel 3: Predicted - Query image with predicted keypoints only
+    title_text = "Predicted"
+    if pck_score is not None:
+        title_text += f"\nPCK@0.2: {pck_score:.1%}"
+    else:
+        title_text += "\nPCK: N/A"
+    ax3.set_title(title_text, fontsize=14, fontweight='bold')
+    ax3.imshow(query_image)
+    ax3.axis('off')
+
+    # Draw predicted keypoints (red X marks)
     if pred_keypoints:
         pred_kpts_array = np.array(pred_keypoints)
         # Denormalize to query image size
@@ -239,7 +246,7 @@ def visualize_pose_prediction(support_image, query_image, pred_keypoints,
             pred_kpts_array[:, 0] *= query_w
             pred_kpts_array[:, 1] *= query_h
 
-        ax2.scatter(pred_kpts_array[:, 0], pred_kpts_array[:, 1],
+        ax3.scatter(pred_kpts_array[:, 0], pred_kpts_array[:, 1],
                    c='red', s=120, marker='x', linewidths=3,
                    label='Predicted', zorder=3)
 
@@ -256,15 +263,9 @@ def visualize_pose_prediction(support_image, query_image, pred_keypoints,
                     if 0 <= src_idx < len(pred_keypoints) and 0 <= dst_idx < len(pred_keypoints):
                         x1, y1 = pred_kpts_array[src_idx]
                         x2, y2 = pred_kpts_array[dst_idx]
-                        ax2.plot([x1, x2], [y1, y2], 'red', linewidth=2, alpha=0.6, zorder=2)
+                        ax3.plot([x1, x2], [y1, y2], 'red', linewidth=2, alpha=0.6, zorder=2)
 
-        # Add keypoint numbers
-        for idx, (x, y) in enumerate(pred_kpts_array):
-            ax2.text(x, y - 10, str(idx + 1), color='white', fontsize=8,
-                    ha='center', va='bottom', fontweight='bold',
-                    bbox=dict(boxstyle='round,pad=0.3', facecolor='black', alpha=0.7))
-
-    ax2.legend(loc='upper right', fontsize=10)
+    ax3.legend(loc='upper right', fontsize=10)
 
     plt.tight_layout()
 
@@ -301,12 +302,291 @@ def visualize_from_checkpoint(args):
     print(f"✓ Model loaded and moved to {device}")
 
     # Load dataset (use training args for dataset config)
-    print(f"\nLoading MP-100 test dataset...")
+    print(f"\nLoading MP-100 dataset...")
 
     # Update train_args with our dataset_root and split_id
     train_args.dataset_root = args.dataset_root
     train_args.mp100_split = args.split_id
 
+    # Handle single image path visualization (for overfitted models)
+    if args.single_image_path:
+        print(f"\n⚠️  Single image mode: {args.single_image_path}")
+        print("   Using this image as both support and query (overfitted model)")
+        
+        # Try to load from train split first (where overfitted models are trained)
+        try:
+            dataset = build_mp100_cape('train', train_args)
+            print(f"✓ Loaded train dataset: {len(dataset)} images")
+        except:
+            dataset = build_mp100_cape('test', train_args)
+            print(f"✓ Loaded test dataset: {len(dataset)} images")
+        
+        # Normalize the image path
+        single_image_path = Path(args.single_image_path)
+        if not single_image_path.is_absolute():
+            single_image_path = Path(args.dataset_root) / single_image_path
+        
+        # Try to find the image using COCO annotations (faster and more reliable)
+        found_idx = None
+        target_filename = single_image_path.name
+        rel_path = str(single_image_path.relative_to(Path(args.dataset_root)))
+        
+        # Search through dataset IDs using COCO annotations
+        coco = dataset.coco
+        for img_id in dataset.ids:
+            img_info = coco.loadImgs(img_id)[0]
+            img_file = img_info['file_name']
+            
+            # Check if filename matches
+            if img_file.endswith(target_filename) or img_file == rel_path or img_file.endswith(rel_path):
+                # Find the dataset index for this image ID
+                try:
+                    idx = dataset.ids.index(img_id)
+                    found_idx = idx
+                    break
+                except ValueError:
+                    continue
+        
+        if found_idx is None:
+            print(f"❌ Image not found in dataset: {args.single_image_path}")
+            print("   Trying to load directly from file system...")
+            # Try loading directly from file
+            if single_image_path.exists():
+                # Load image and annotations manually
+                from PIL import Image as PILImage
+                import json
+                
+                # Find annotations for this image
+                ann_file = Path(train_args.dataset_root) / "annotations" / f"mp100_split{args.split_id}_train.json"
+                if not ann_file.exists():
+                    ann_file = Path(train_args.dataset_root) / "annotations" / f"mp100_split{args.split_id}_test.json"
+                
+                if ann_file.exists():
+                    with open(ann_file) as f:
+                        ann_data = json.load(f)
+                    
+                    # Find image in annotations
+                    rel_path = str(single_image_path.relative_to(Path(args.dataset_root)))
+                    img_info = None
+                    for img in ann_data['images']:
+                        if img['file_name'] == rel_path or img['file_name'].endswith(single_image_path.name):
+                            img_info = img
+                            break
+                    
+                    if img_info:
+                        # Find annotations for this image
+                        anns = [a for a in ann_data['annotations'] if a['image_id'] == img_info['id']]
+                        if anns:
+                            ann = anns[0]
+                            # Load image
+                            img = PILImage.open(single_image_path).convert('RGB')
+                            # Get keypoints
+                            keypoints = ann['keypoints']
+                            num_kpts = len(keypoints) // 3
+                            coords = []
+                            visibility = []
+                            for i in range(num_kpts):
+                                x = keypoints[i*3]
+                                y = keypoints[i*3+1]
+                                v = keypoints[i*3+2]
+                                coords.append([x / img_info['width'], y / img_info['height']])
+                                visibility.append(v)
+                            
+                            # Create a mock dataset entry
+                            data = {
+                                'image': img,
+                                'keypoints': coords,
+                                'visibility': visibility,
+                                'image_path': str(single_image_path),
+                                'skeleton': ann.get('skeleton', [])
+                            }
+                            
+                            # Use same image as support and query
+                            support_data = data
+                            query_data = data
+                            
+                            # Run inference
+                            query_image = query_data['image']
+                            support_image = support_data['image']
+                            support_coords = support_data['keypoints']
+                            support_visibility = support_data.get('visibility', [1] * len(support_coords))
+                            support_mask = torch.tensor([v > 0 for v in support_visibility], dtype=torch.float32)
+                            skeleton_edges = support_data.get('skeleton', [])
+                            query_gt_coords = query_data['keypoints']
+                            
+                            # Prepare tensors
+                            if isinstance(query_image, PILImage.Image):
+                                query_image_tensor = torch.from_numpy(np.array(query_image)).permute(2, 0, 1).unsqueeze(0).to(device).float() / 255.0
+                            else:
+                                query_image_tensor = query_image.unsqueeze(0).to(device)
+                            
+                            support_coords_tensor = torch.tensor(support_coords, dtype=torch.float32).unsqueeze(0).to(device)
+                            support_mask_tensor = support_mask.unsqueeze(0).to(device)
+                            
+                            # Run inference
+                            with torch.no_grad():
+                                predictions = model.forward_inference(
+                                    samples=query_image_tensor,
+                                    support_coords=support_coords_tensor,
+                                    support_mask=support_mask_tensor,
+                                    skeleton_edges=[skeleton_edges]
+                                )
+                            
+                            # Decode predictions
+                            pred_tokens = predictions['sequences'][0].cpu()
+                            pred_coords = predictions['coordinates'][0].cpu()
+                            
+                            # Create tokenizer for decoding
+                            import numpy as np
+                            num_bins = int(np.sqrt(train_args.vocab_size))
+                            from datasets.discrete_tokenizer import DiscreteTokenizer
+                            tokenizer = DiscreteTokenizer(
+                                num_bins=num_bins,
+                                seq_len=train_args.seq_len,
+                                add_cls=getattr(train_args, 'add_cls_token', False)
+                            )
+                            
+                            pred_keypoints = decode_sequence_to_keypoints(pred_tokens, pred_coords, tokenizer)
+                            
+                            # Compute PCK
+                            pck_score = None
+                            if query_gt_coords and len(pred_keypoints) > 0:
+                                from util.eval_utils import compute_pck_bbox
+                                bbox_w = img_info['width']
+                                bbox_h = img_info['height']
+                                num_kpts = min(len(pred_keypoints), len(query_gt_coords))
+                                pred_kpts_trimmed = pred_keypoints[:num_kpts]
+                                gt_kpts_trimmed = query_gt_coords[:num_kpts]
+                                vis_trimmed = visibility[:num_kpts]
+                                
+                                pck_score, num_correct, num_visible = compute_pck_bbox(
+                                    pred_keypoints=np.array(pred_kpts_trimmed),
+                                    gt_keypoints=np.array(gt_kpts_trimmed),
+                                    bbox_width=bbox_w,
+                                    bbox_height=bbox_h,
+                                    visibility=np.array(vis_trimmed),
+                                    threshold=0.2,
+                                    normalize_by='diagonal'
+                                )
+                            
+                            # Visualize
+                            vis_support_image = np.array(support_image)
+                            vis_query_image = np.array(query_image)
+                            
+                            save_path = output_dir / f"single_image_{single_image_path.stem}.png"
+                            visualize_pose_prediction(
+                                support_image=vis_support_image,
+                                query_image=vis_query_image,
+                                pred_keypoints=pred_keypoints,
+                                support_keypoints=support_coords,
+                                gt_keypoints=query_gt_coords,
+                                skeleton_edges=skeleton_edges,
+                                save_path=save_path,
+                                category_name=f"Single Image: {single_image_path.name}",
+                                pck_score=pck_score
+                            )
+                            
+                            print(f"\n✓ Visualization complete!")
+                            print(f"  Saved to: {save_path}")
+                            if pck_score is not None:
+                                print(f"  PCK@0.2: {pck_score:.2%}")
+                            return
+        
+        if found_idx is not None:
+            # Load the found image
+            data = dataset[found_idx]
+            support_data = data
+            query_data = data  # Use same image as support and query
+            
+            # Prepare inputs
+            query_image = query_data['image']
+            support_image = support_data['image']
+            support_coords = support_data['keypoints']
+            support_visibility = support_data.get('visibility', [1] * len(support_coords))
+            support_mask = torch.tensor([v > 0 for v in support_visibility], dtype=torch.float32)
+            skeleton_edges = support_data.get('skeleton', [])
+            query_gt_coords = query_data['keypoints']
+            
+            # Move to device and prepare for model
+            if isinstance(query_image, torch.Tensor):
+                query_image_tensor = query_image.unsqueeze(0).to(device)
+            else:
+                query_image_tensor = torch.from_numpy(np.array(query_image)).permute(2, 0, 1).unsqueeze(0).to(device).float()
+            
+            support_coords_tensor = torch.tensor(support_coords, dtype=torch.float32).unsqueeze(0).to(device)
+            support_mask_tensor = support_mask.unsqueeze(0).to(device)
+            
+            # Run inference
+            with torch.no_grad():
+                predictions = model.forward_inference(
+                    samples=query_image_tensor,
+                    support_coords=support_coords_tensor,
+                    support_mask=support_mask_tensor,
+                    skeleton_edges=[skeleton_edges]
+                )
+            
+            # Decode predictions
+            pred_tokens = predictions['sequences'][0].cpu()
+            pred_coords = predictions['coordinates'][0].cpu()
+            
+            tokenizer = dataset.tokenizer
+            pred_keypoints = decode_sequence_to_keypoints(pred_tokens, pred_coords, tokenizer)
+            
+            # Compute PCK
+            pck_score = None
+            if query_gt_coords and len(pred_keypoints) > 0:
+                from util.eval_utils import compute_pck_bbox
+                bbox_w = data.get('bbox_width', 512.0)
+                bbox_h = data.get('bbox_height', 512.0)
+                num_kpts = min(len(pred_keypoints), len(query_gt_coords))
+                pred_kpts_trimmed = pred_keypoints[:num_kpts]
+                gt_kpts_trimmed = query_gt_coords[:num_kpts]
+                vis_trimmed = support_visibility[:num_kpts]
+                
+                pck_score, num_correct, num_visible = compute_pck_bbox(
+                    pred_keypoints=np.array(pred_kpts_trimmed),
+                    gt_keypoints=np.array(gt_kpts_trimmed),
+                    bbox_width=bbox_w,
+                    bbox_height=bbox_h,
+                    visibility=np.array(vis_trimmed),
+                    threshold=0.2,
+                    normalize_by='diagonal'
+                )
+            
+            # Convert images for visualization
+            if isinstance(support_data['image'], torch.Tensor):
+                vis_support_image = support_data['image'].permute(1, 2, 0).numpy()
+                vis_support_image = (vis_support_image * 255).astype(np.uint8)
+            else:
+                vis_support_image = support_data['image']
+            
+            if isinstance(data['image'], torch.Tensor):
+                vis_query_image = data['image'].permute(1, 2, 0).numpy()
+                vis_query_image = (vis_query_image * 255).astype(np.uint8)
+            else:
+                vis_query_image = data['image']
+            
+            # Visualize
+            save_path = output_dir / f"single_image_{single_image_path.stem}.png"
+            visualize_pose_prediction(
+                support_image=vis_support_image,
+                query_image=vis_query_image,
+                pred_keypoints=pred_keypoints,
+                support_keypoints=support_coords,
+                gt_keypoints=query_gt_coords,
+                skeleton_edges=skeleton_edges,
+                save_path=save_path,
+                category_name=f"Single Image: {single_image_path.name}",
+                pck_score=pck_score
+            )
+            
+            print(f"\n✓ Visualization complete!")
+            print(f"  Saved to: {save_path}")
+            if pck_score is not None:
+                print(f"  PCK@0.2: {pck_score:.2%}")
+            return
+    
+    # Normal multi-image visualization
     dataset = build_mp100_cape('test', train_args)
     print(f"✓ Loaded {len(dataset)} test images")
 
@@ -369,36 +649,42 @@ def visualize_from_checkpoint(args):
         cat_name = test_categories_info.get(cat_id, f"cat_{cat_id}")
         print(f"\nCategory: {cat_name} (ID: {cat_id})")
 
-        # Take up to num_samples per category
-        for sample_idx in sample_indices[:args.num_samples]:
+        # Get support data (first example in category as template)
+        # This must be done before selecting query samples
+        try:
+            support_idx = sample_indices[0]
+            support_data = dataset[support_idx]
+        except ImageNotFoundError:
+            # Try to find a valid support example
+            support_data = None
+            for alt_support_idx in sample_indices:
+                try:
+                    support_data = dataset[alt_support_idx]
+                    support_idx = alt_support_idx
+                    break
+                except ImageNotFoundError:
+                    continue
+            if support_data is None:
+                print(f"  Skipping category {cat_name} (no valid support image)")
+                continue
+
+        # Take up to num_samples per category, but skip the support image
+        # Start from index 1 to avoid visualizing the same image as support
+        query_samples = sample_indices[1:1+args.num_samples] if len(sample_indices) > 1 else []
+        
+        if len(query_samples) == 0:
+            print(f"  Skipping category {cat_name} (only 1 image, need at least 2 for support+query)")
+            continue
+        
+        for sample_idx in query_samples:
             try:
                 data = dataset[sample_idx]
             except ImageNotFoundError:
                 print(f"  Skipping sample {sample_idx} (image not found)")
                 continue
 
-            # Get support data (first example in category as template)
-            try:
-                support_idx = sample_indices[0]
-                support_data = dataset[support_idx]
-            except ImageNotFoundError:
-                # Try to find a valid support example
-                support_data = None
-                for alt_support_idx in sample_indices:
-                    try:
-                        support_data = dataset[alt_support_idx]
-                        support_idx = alt_support_idx
-                        break
-                    except ImageNotFoundError:
-                        continue
-                if support_data is None:
-                    print(f"  Skipping category {cat_name} (no valid support image)")
-                    continue
-
-            # Skip if support and query are the same image
-            if support_idx == sample_idx:
-                print(f"  Skipping sample {sample_idx} (same as support)")
-                continue
+            # Support data is already loaded above (before the loop)
+            # No need to check if same as support since we skip it in query_samples
 
             # Prepare inputs
             query_image = data['image']
@@ -504,9 +790,10 @@ def visualize_from_checkpoint(args):
     print(f"  Categories visualized: {len(category_samples)}")
     print(f"  Total images: {total_visualized}")
     print(f"  Saved to: {output_dir}")
-    print(f"\nVisualization format:")
-    print(f"  - Left panel:  Support image with GT keypoints (green circles)")
-    print(f"  - Right panel: Query image with predicted (red X) and GT (cyan circles)")
+    print(f"\nVisualization format (3-panel layout):")
+    print(f"  - Panel 1 (Support GT):  Support image with GT keypoints (green circles)")
+    print(f"  - Panel 2 (Ground Truth): Query image with GT keypoints (cyan circles)")
+    print(f"  - Panel 3 (Predicted):    Query image with predicted keypoints (red X marks)")
     print(f"  - PCK@0.2 score shown in title for each prediction")
     print("=" * 80)
 
@@ -559,6 +846,10 @@ Examples:
     parser.add_argument('--categories', type=int, nargs='+', default=None,
                        help='Specific category IDs to visualize (default: all test categories). '
                             'Example: --categories 40 55 68')
+    parser.add_argument('--single_image_path', type=str, default=None,
+                       help='Path to a specific image to visualize (for overfitted models). '
+                            'If provided, this image will be used as both support and query. '
+                            'Example: --single_image_path data/camel_face/camel_133.jpg')
 
     # ========================================================================
     # Note: Model architecture parameters are loaded from checkpoint
