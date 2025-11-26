@@ -64,6 +64,14 @@ def get_args_parser():
     parser.add_argument('--category_split_file', default='category_splits.json',
                         help='Path to category split JSON file')
     
+    # Geometric encoder options (CapeX-inspired refactoring)
+    parser.add_argument('--use_geometric_encoder', action='store_true', default=False,
+                        help='Use GeometricSupportEncoder (CapeX-inspired) instead of old SupportPoseGraphEncoder')
+    parser.add_argument('--use_gcn_preenc', action='store_true', default=False,
+                        help='Use GCN pre-encoding in geometric support encoder (requires --use_geometric_encoder)')
+    parser.add_argument('--num_gcn_layers', default=2, type=int,
+                        help='Number of GCN layers if use_gcn_preenc=True')
+    
     # Debug / Overfitting mode (for testing model can learn)
     parser.add_argument('--debug_overfit_category', default=None, type=int,
                         help='DEBUG: Train on single category ID for overfitting test (ignores category_split_file)')
@@ -139,6 +147,8 @@ def get_args_parser():
                         help='Set to 0 for CAPE (no category classification)')
     parser.add_argument('--raster_loss_coef', default=0.0, type=float,
                         help='Rasterization loss coefficient (not used for CAPE)')
+    parser.add_argument('--eos_weight', default=20.0, type=float,
+                        help='Class weight for EOS token to combat class imbalance (default: 20.0)')
     parser.add_argument('--label_smoothing', default=0.0, type=float)
 
     # Dataset parameters
@@ -194,10 +204,36 @@ def get_device():
 
 
 def main(args):
+    """
+    CAPE Training Strategy (Geometry-Only):
+
+    TRAINING PHASE:
+    - Episodic sampling: 1 support image + K query images per episode
+    - Support and query from SAME category, DIFFERENT images
+    - Support provides: coordinates + skeleton (geometric context)
+    - Query learns: autoregressive sequence generation
+    - Causal masking: prevents future token peeking
+    - Teacher forcing: uses GT sequences for training
+
+    VALIDATION PHASE:
+    - Support and query from SAME UNSEEN categories (validation set)
+    - Tests generalization to novel object categories
+    - Measures PCK on unseen category structure
+
+    INFERENCE (TEST) PHASE:
+    - Support and query from UNSEEN categories (test set)
+    - True category-agnostic generalization test
+    - Support from one example, query on novel instances
+    """
     print("=" * 80)
     print("Category-Agnostic Pose Estimation (CAPE) - Episodic Training")
     print("=" * 80)
     print(f"\nMode: Episodic meta-learning with support pose graphs")
+    print(f"Support encoder: {'Geometric (CapeX-inspired)' if args.use_geometric_encoder else 'Original'}")
+    if args.use_geometric_encoder:
+        print(f"  - GCN pre-encoding: {'Enabled' if args.use_gcn_preenc else 'Disabled'}")
+        if args.use_gcn_preenc:
+            print(f"  - GCN layers: {args.num_gcn_layers}")
     print(f"Support encoder layers: {args.support_encoder_layers}")
     print(f"Fusion method: {args.support_fusion_method}")
     print(f"Queries per episode: {args.num_queries_per_episode}")

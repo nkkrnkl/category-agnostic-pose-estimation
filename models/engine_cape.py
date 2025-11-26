@@ -84,7 +84,8 @@ def train_one_epoch_episodic(model: torch.nn.Module, criterion: torch.nn.Module,
     # Wrap data_loader with tqdm for progress bar
     # mininterval: update at most once per 2 seconds
     # miniters: update at least every 20 iterations
-    pbar = tqdm(data_loader, desc=f'Epoch {epoch}', leave=True, ncols=100, 
+    # ncols=None auto-detects terminal width
+    pbar = tqdm(data_loader, desc=f'Epoch {epoch}', leave=True, ncols=None, 
                 mininterval=2.0, miniters=20)
     
     for batch_idx, batch in enumerate(pbar):
@@ -343,7 +344,7 @@ def evaluate_cape(model, criterion, data_loader, device, compute_pck=True, pck_t
     # Wrap data_loader with tqdm for progress bar
     # mininterval: update at most once per 2 seconds
     # miniters: update at least every 10 iterations
-    pbar = tqdm(data_loader, desc='Validation (Autoregressive)', leave=True, ncols=100,
+    pbar = tqdm(data_loader, desc='Validation (Autoregressive)', leave=True, ncols=None,
                 mininterval=2.0, miniters=10)
     
     for batch_idx, batch in enumerate(pbar):
@@ -565,8 +566,16 @@ def evaluate_cape(model, criterion, data_loader, device, compute_pck=True, pck_t
                     if pred_logits is not None:
                         # Use model's predicted token types
                         from util.sequence_utils import extract_keypoints_from_predictions
+                        # ================================================================
+                        # CRITICAL FIX: Don't limit max_keypoints during extraction
+                        # ================================================================
+                        # BUG: max_keypoints=gt_kpts.shape[1] artificially limits extraction
+                        #      If model predicts fewer keypoints (e.g., 14 for a 17-kpt category),
+                        #      we can't "add" them back during trimming later.
+                        # FIX: Extract ALL predicted keypoints, then trim per-category below
+                        # ================================================================
                         pred_kpts = extract_keypoints_from_predictions(
-                            pred_coords, pred_logits, max_keypoints=gt_kpts.shape[1]
+                            pred_coords, pred_logits, max_keypoints=None  # Extract all
                         )
                     else:
                         # Fallback if logits not available
@@ -658,25 +667,50 @@ def evaluate_cape(model, criterion, data_loader, device, compute_pck=True, pck_t
                             num_kpts_for_category = len(vis)  # Actual number of keypoints for this category
                             
                             # ================================================================
-                            # CRITICAL ASSERTION: Detect keypoint count mismatch
+                            # CRITICAL: Handle keypoint count mismatches
                             # ================================================================
                             pred_count = pred_kpts[idx].shape[0]
                             expected_count = num_kpts_for_category
-                            excess = pred_count - expected_count
                             
-                            if excess > 10 and batch_idx == 0 and idx == 0:  # Warn once
+                            if pred_count > expected_count + 10 and batch_idx == 0 and idx == 0:
                                 import warnings
                                 warnings.warn(
-                                    f"⚠️  Model generated {pred_count} keypoints but expected ~{expected_count}. "
-                                    f"Excess: {excess}. Model likely didn't learn EOS prediction properly. "
-                                    f"Recommend retraining with EOS token included in classification loss."
+                                    f"⚠️  Model generated {pred_count} keypoints but expected {expected_count}. "
+                                    f"Excess: {pred_count - expected_count}. Model likely didn't learn EOS properly."
                                 )
-                            # ================================================================
                             
-                            # Trim predictions and ground truth to match this category's keypoint count
-                            # This handles variable-length sequences across different MP-100 categories
-                            pred_kpts_trimmed.append(pred_kpts[idx, :num_kpts_for_category, :])  # (num_kpts, 2)
-                            gt_kpts_trimmed.append(gt_kpts[idx, :num_kpts_for_category, :])      # (num_kpts, 2)
+                            # ================================================================
+                            # CRITICAL FIX: Pad or trim predictions to match GT count
+                            # ================================================================
+                            # Case 1: Model predicted MORE keypoints than category has
+                            #   → Trim to expected count
+                            # Case 2: Model predicted FEWER keypoints than category has
+                            #   → Pad with zeros (treat as incorrect predictions)
+                            # ================================================================
+                            if pred_count >= expected_count:
+                                # Trim excess predictions
+                                pred_kpts_trimmed.append(pred_kpts[idx, :expected_count, :])
+                            else:
+                                # Pad with zeros if model predicted too few
+                                pred_sample = pred_kpts[idx]  # (pred_count, 2)
+                                padding = torch.zeros(
+                                    expected_count - pred_count, 2,
+                                    dtype=pred_sample.dtype,
+                                    device=pred_sample.device
+                                )
+                                pred_padded = torch.cat([pred_sample, padding], dim=0)  # (expected_count, 2)
+                                pred_kpts_trimmed.append(pred_padded)
+                                
+                                if batch_idx == 0 and idx == 0:
+                                    import warnings
+                                    warnings.warn(
+                                        f"⚠️  Model only generated {pred_count}/{expected_count} keypoints. "
+                                        f"Padding {expected_count - pred_count} with zeros (will hurt PCK)."
+                                    )
+                            
+                            # Trim GT to match category keypoint count (should already match, but be safe)
+                            gt_kpts_trimmed.append(gt_kpts[idx, :expected_count, :])
+                            # ================================================================
                             
                             visibility_list.append(vis)
                         
@@ -798,7 +832,7 @@ def evaluate_unseen_categories(
     # Wrap data_loader with tqdm for progress bar
     # mininterval: update at most once per 2 seconds
     # miniters: update at least every 10 iterations
-    pbar = tqdm(data_loader, desc=f'Test (Unseen) PCK@{pck_threshold}', leave=True, ncols=100,
+    pbar = tqdm(data_loader, desc=f'Test (Unseen) PCK@{pck_threshold}', leave=True, ncols=None,
                 mininterval=2.0, miniters=10)
     
     for batch_idx, batch in enumerate(pbar):

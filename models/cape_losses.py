@@ -61,7 +61,7 @@ class CAPESetCriterion(SetCriterion):
     """
     
     def __init__(self, num_classes, semantic_classes, matcher, weight_dict, losses,
-                 label_smoothing=0., per_token_sem_loss=False):
+                 label_smoothing=0., per_token_sem_loss=False, eos_weight=20.0):
         """
         Initialize CAPE criterion.
         
@@ -73,6 +73,7 @@ class CAPESetCriterion(SetCriterion):
             losses: List of loss names to compute ['labels', 'polys', ...]
             label_smoothing: Label smoothing factor (0 = no smoothing)
             per_token_sem_loss: Whether to compute semantic loss per token
+            eos_weight: Weight multiplier for EOS token to combat class imbalance (default: 20.0)
         """
         super().__init__(
             num_classes=num_classes,
@@ -83,6 +84,23 @@ class CAPESetCriterion(SetCriterion):
             label_smoothing=label_smoothing,
             per_token_sem_loss=per_token_sem_loss
         )
+        
+        # ========================================================================
+        # CRITICAL FIX: Class-weighted loss to combat severe class imbalance
+        # ========================================================================
+        # Problem: EOS token appears ~8-20× less frequently than COORD tokens
+        #          (1 EOS per sequence vs. 8-32 COORD tokens)
+        # Impact: Model receives weak gradient signal for EOS prediction
+        #         Result: Model doesn't learn when to stop generation
+        # Solution: Give EOS tokens higher weight in cross-entropy loss
+        # ========================================================================
+        self.eos_weight = eos_weight
+        
+        # Create class weights tensor: [COORD, SEP, EOS, CLS]
+        # TokenType: coord=0, sep=1, eos=2, cls=3
+        self.class_weights = torch.ones(num_classes, dtype=torch.float32)
+        self.class_weights[2] = eos_weight  # EOS token gets higher weight
+        print(f"✓ CAPE criterion: EOS token weight = {eos_weight}× (to combat class imbalance)")
     
     def loss_labels(self, outputs, targets, indices):
         """
@@ -130,9 +148,25 @@ class CAPESetCriterion(SetCriterion):
             # Fallback: use only valid mask (backward compatibility)
             mask = valid_mask
         
-        # Compute loss only on masked tokens
-        loss_ce = label_smoothed_nll_loss(src_logits[mask], target_classes[mask],
-                                          epsilon=self.label_smoothing)
+        # ========================================================================
+        # CRITICAL FIX: Use class-weighted cross-entropy for EOS prediction
+        # ========================================================================
+        # Compute loss with class weights to boost EOS learning
+        # ========================================================================
+        if self.label_smoothing > 0:
+            # Use label smoothing (no class weights supported)
+            loss_ce = label_smoothed_nll_loss(src_logits[mask], target_classes[mask],
+                                              epsilon=self.label_smoothing)
+        else:
+            # Use class-weighted cross-entropy
+            class_weights_device = self.class_weights.to(src_logits.device)
+            loss_ce = F.cross_entropy(
+                src_logits[mask],
+                target_classes[mask],
+                weight=class_weights_device,
+                reduction='mean'
+            )
+        
         losses = {'loss_ce': loss_ce}
 
         # Semantic prediction (room/door/window for floorplans, category for CAPE)
@@ -281,7 +315,8 @@ def build_cape_criterion(args, num_classes=3):
         weight_dict=weight_dict,
         losses=losses,
         label_smoothing=getattr(args, 'label_smoothing', 0.0),
-        per_token_sem_loss=getattr(args, 'per_token_sem_loss', False)
+        per_token_sem_loss=getattr(args, 'per_token_sem_loss', False),
+        eos_weight=getattr(args, 'eos_weight', 20.0)  # Default 20× weight for EOS
     )
     
     return criterion
