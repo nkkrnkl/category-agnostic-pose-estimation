@@ -437,7 +437,6 @@ def visualize_from_checkpoint(args):
                             pred_coords = predictions['coordinates'][0].cpu()
                             
                             # Create tokenizer for decoding
-                            import numpy as np
                             num_bins = int(np.sqrt(train_args.vocab_size))
                             from datasets.discrete_tokenizer import DiscreteTokenizer
                             tokenizer = DiscreteTokenizer(
