@@ -373,6 +373,10 @@ def visualize_pose_prediction(support_image, query_image, pred_keypoints,
     # This helps diagnose visualization/coordinate bugs
     # ========================================================================
     if debug_coords and gt_keypoints and pred_keypoints:
+        # Also print PCK score for context
+        if pck_score is not None:
+            print(f"\n  PCK@0.2 score: {pck_score:.1%}")
+            print(f"  NOTE: This is PCK for THIS SPECIFIC IMAGE, not the validation set average.")
         print(f"\n{'='*80}")
         print(f"COORDINATE COMPARISON DEBUG: {category_name}")
         print(f"{'='*80}")
@@ -470,6 +474,8 @@ def visualize_from_checkpoint(args):
     if 'val_pck' in checkpoint:
         val_pck = checkpoint.get('val_pck', 0.0)
         print(f"  Checkpoint validation PCK: {val_pck:.2%}")
+        print(f"  ⚠️  NOTE: This PCK was computed on the VALIDATION SET (all images).")
+        print(f"     Individual images may have different PCK scores.")
         if val_pck < 0.5:
             print(f"  ⚠️  WARNING: Low validation PCK ({val_pck:.2%}) - this checkpoint may not be fully trained!")
     elif 'val_stats' in checkpoint:
@@ -477,6 +483,8 @@ def visualize_from_checkpoint(args):
         val_pck = val_stats.get('pck', 0.0)
         if val_pck > 0:
             print(f"  Checkpoint validation PCK: {val_pck:.2%}")
+            print(f"  ⚠️  NOTE: This PCK was computed on the VALIDATION SET (all images).")
+            print(f"     Individual images may have different PCK scores.")
             if val_pck < 0.5:
                 print(f"  ⚠️  WARNING: Low validation PCK ({val_pck:.2%}) - this checkpoint may not be fully trained!")
 

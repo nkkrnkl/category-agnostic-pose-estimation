@@ -1130,12 +1130,25 @@ def main(args):
         # ========================================================================
         # Since validation now uses autoregressive inference on unseen categories,
         # PCK is the PRIMARY metric. Loss is not computed during validation.
+        #
+        # IMPORTANT: We use VALIDATION PCK (val_stats['pck']), NOT training PCK.
+        # This ensures the best checkpoint is selected based on generalization
+        # to unseen categories, not memorization of training data.
         # ========================================================================
-        val_pck = val_stats.get('pck', 0.0)  # Extract PCK from validation stats
+        val_pck = val_stats.get('pck', 0.0)  # Extract PCK from VALIDATION stats (not training!)
         val_pck_mean = val_stats.get('pck_mean_categories', 0.0)
+        
+        # Verify we're using validation PCK (not training)
+        if 'train_pck' in val_stats:
+            import warnings
+            warnings.warn(
+                "WARNING: val_stats contains 'train_pck' - this should not happen! "
+                "Checkpoint selection should use VALIDATION PCK only."
+            )
         
         # Track best PCK (for best pose estimation performance AND early stopping)
         # CRITICAL: Early stopping based on PCK on UNSEEN validation categories!
+        # This uses VALIDATION PCK, not training PCK.
         pck_improved = False
         if val_pck > best_pck:
             pck_improved = True
@@ -1168,15 +1181,16 @@ def main(args):
                 best_pck_dict['cuda_rng_state'] = torch.cuda.get_rng_state_all()
             
             torch.save(best_pck_dict, best_pck_path)
-            print(f"  ✓ Saved BEST PCK model (PCK: {val_pck:.4f}, Mean PCK: {val_pck_mean:.4f})")
+            print(f"  ✓ Saved BEST PCK model (VALIDATION PCK: {val_pck:.4f}, Mean PCK: {val_pck_mean:.4f})")
+            print(f"     → This checkpoint is selected based on VALIDATION performance, not training.")
         
         # Report progress (early stopping based on PCK)
         if not pck_improved:
-            # No improvement in PCK
+            # No improvement in VALIDATION PCK
             epochs_without_improvement += 1
-            print(f"  → No improvement in PCK for {epochs_without_improvement} epoch(s)")
-            print(f"     Best PCK:    {best_pck:.4f}")
-            print(f"     Current PCK: {val_pck:.4f}")
+            print(f"  → No improvement in VALIDATION PCK for {epochs_without_improvement} epoch(s)")
+            print(f"     Best VALIDATION PCK:    {best_pck:.4f}")
+            print(f"     Current VALIDATION PCK: {val_pck:.4f}")
             if single_image_mode:
                 print(f"     (on {val_stats.get('pck_num_visible', 0)} visible keypoints - same image validation)")
             else:

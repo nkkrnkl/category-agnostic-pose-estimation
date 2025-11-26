@@ -610,6 +610,18 @@ def evaluate_cape(model, criterion, data_loader, device, compute_pck=True, pck_t
             # Extract predicted coordinates from inference
             pred_coords = predictions.get('coordinates', None)  # (B, seq_len, 2)
             
+            # DEBUG: Check what's in predictions dict
+            DEBUG_PCK_EXTRACTION = os.environ.get('DEBUG_PCK_EXTRACTION', '0') == '1'
+            if DEBUG_PCK_EXTRACTION and batch_idx == 0:
+                print(f"\n[DEBUG_PCK_EXTRACTION] Predictions dict keys: {list(predictions.keys())}")
+                print(f"  'logits' in predictions: {'logits' in predictions}")
+                print(f"  'sequences' in predictions: {'sequences' in predictions}")
+                print(f"  'coordinates' in predictions: {'coordinates' in predictions}")
+                if 'logits' in predictions:
+                    print(f"  logits shape: {predictions['logits'].shape if predictions['logits'] is not None else None}")
+                if 'sequences' in predictions:
+                    print(f"  sequences shape: {predictions['sequences'].shape if predictions['sequences'] is not None else None}")
+            
             if pred_coords is not None:
                 # Extract ground truth keypoints from targets
                 gt_coords = query_targets.get('target_seq', None)  # (B, seq_len, 2)
@@ -632,8 +644,13 @@ def evaluate_cape(model, criterion, data_loader, device, compute_pck=True, pck_t
                     
                     # Extract predictions using PREDICTED token labels (fixed)
                     pred_logits = predictions.get('logits', None)
+                    pred_sequences = predictions.get('sequences', None)  # Try sequences key too
+                    
+                    # CRITICAL: Always use predicted token structure, never GT token_labels for predictions!
+                    # Using GT token_labels assumes model generates exact same sequence as GT, which
+                    # gives artificially perfect PCK=1.0 even when coordinates are wrong.
                     if pred_logits is not None:
-                        # Use model's predicted token types
+                        # Use model's predicted token types (CORRECT PATH)
                         from util.sequence_utils import extract_keypoints_from_predictions
                         # ================================================================
                         # CRITICAL FIX: Don't limit max_keypoints during extraction
@@ -646,12 +663,32 @@ def evaluate_cape(model, criterion, data_loader, device, compute_pck=True, pck_t
                         pred_kpts = extract_keypoints_from_predictions(
                             pred_coords, pred_logits, max_keypoints=None  # Extract all
                         )
-                    else:
-                        # Fallback if logits not available
-                        # Still use GT structure but add WARNING
+                    elif pred_sequences is not None:
+                        # Alternative: Use predicted sequences (token IDs) if available
+                        # Convert sequences to logits-like format for extraction
                         if batch_idx == 0:
-                            print("⚠️  WARNING: Using GT token structure for predictions (logits unavailable)")
-                            print("   This may cause incorrect PCK if model's token sequence differs from GT")
+                            print("⚠️  Using predicted sequences (token IDs) for keypoint extraction")
+                        # Create one-hot-like logits from sequences
+                        # This is a workaround - ideally we'd have logits
+                        from util.sequence_utils import extract_keypoints_from_sequence
+                        # Use sequences as "token labels" for extraction
+                        # Note: This assumes sequences are the predicted token types
+                        pred_kpts = extract_keypoints_from_sequence(
+                            pred_coords, pred_sequences, mask
+                        )
+                    else:
+                        # CRITICAL BUG: Fallback uses GT token_labels, which gives wrong PCK!
+                        # This assumes model generates exact same token sequence as GT.
+                        # In single-image overfitting, this can give PCK=1.0 even with wrong coordinates!
+                        if batch_idx == 0:
+                            import warnings
+                            warnings.warn(
+                                "⚠️  CRITICAL: Using GT token structure for predictions (logits/sequences unavailable)! "
+                                "This will give INCORRECT PCK scores. The model may generate different token sequences "
+                                "than GT, but we're extracting using GT structure, which assumes perfect sequence match. "
+                                "This can cause PCK=1.0 even when coordinates are wrong!"
+                            )
+                            print("   → This is likely why validation PCK=1.0 but visualization shows misalignment!")
                         pred_kpts = extract_keypoints_from_sequence(
                             pred_coords, token_labels, mask
                         )
@@ -662,7 +699,9 @@ def evaluate_cape(model, criterion, data_loader, device, compute_pck=True, pck_t
                     DEBUG_PCK = os.environ.get('DEBUG_PCK', '0') == '1'
                     if DEBUG_PCK and batch_idx == 0:
                         print(f"\n[DEBUG_PCK] Batch 0 - Keypoint Extraction:")
-                        print(f"  Using predicted token labels: {pred_logits is not None}")
+                        print(f"  Using predicted logits: {pred_logits is not None}")
+                        print(f"  Using predicted sequences: {pred_sequences is not None}")
+                        print(f"  Using GT token_labels (FALLBACK): {pred_logits is None and pred_sequences is None}")
                         print(f"  pred_kpts[0] shape: {pred_kpts[0].shape}")
                         print(f"  gt_kpts[0] shape: {gt_kpts[0].shape}")
                         print(f"  pred_kpts[0, :3]: {pred_kpts[0, :3]}")
@@ -671,7 +710,15 @@ def evaluate_cape(model, criterion, data_loader, device, compute_pck=True, pck_t
                         print(f"  Are they identical? {are_identical}")
                         if are_identical:
                             print(f"  ⚠️  CRITICAL: Predictions are IDENTICAL to GT!")
-                            print(f"  This indicates data leakage or a bug in the model.")
+                            print(f"  This indicates:")
+                            print(f"    1. Data leakage (model seeing GT during inference)")
+                            print(f"    2. Bug in model (copying GT coordinates)")
+                            print(f"    3. Using GT token_labels for extraction (fallback bug)")
+                        # Check coordinate differences
+                        coord_diff = torch.abs(pred_kpts[0] - gt_kpts[0]).mean().item()
+                        print(f"  Mean coordinate difference: {coord_diff:.6f}")
+                        if coord_diff < 0.001 and not are_identical:
+                            print(f"  ⚠️  WARNING: Very small differences - might be using GT token structure!")
                     # ================================================================
                     
                     # ================================================================
