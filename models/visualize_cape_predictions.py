@@ -306,10 +306,16 @@ def visualize_from_checkpoint(args):
 
     # Load model (uses saved training args from checkpoint)
     model, train_args = load_model(args.checkpoint)
+    
+    # Load checkpoint again to get epoch info for filename
+    checkpoint = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
+    checkpoint_epoch = checkpoint.get('epoch', 'unknown')
+    
     device = torch.device(args.device)
     model = model.to(device)
     
     print(f"✓ Model loaded and moved to {device}")
+    print(f"  Checkpoint epoch: {checkpoint_epoch}")
 
     # Load dataset (use training args for dataset config)
     print(f"\nLoading MP-100 dataset...")
@@ -321,7 +327,7 @@ def visualize_from_checkpoint(args):
     # Handle single image path visualization (for overfitted models)
     if args.single_image_path:
         print(f"\n⚠️  Single image mode: {args.single_image_path}")
-        print("   Using this image as both support and query (overfitted model)")
+        print("   Using this SAME image as both support and query (for overfitting visualization)")
         
         # Try to load from train split first (where overfitted models are trained)
         try:
@@ -480,11 +486,11 @@ def visualize_from_checkpoint(args):
                                     normalize_by='diagonal'
                                 )
                             
-                            # Visualize
+                            # Visualize (include checkpoint epoch in filename to distinguish different checkpoints)
                             vis_support_image = np.array(support_image)
                             vis_query_image = np.array(query_image)
                             
-                            save_path = output_dir / f"single_image_{single_image_path.stem}.png"
+                            save_path = output_dir / f"single_image_{single_image_path.stem}_epoch{checkpoint_epoch}.png"
                             visualize_pose_prediction(
                                 support_image=vis_support_image,
                                 query_image=vis_query_image,
@@ -504,10 +510,20 @@ def visualize_from_checkpoint(args):
                             return
         
         if found_idx is not None:
-            # Load the found image
-            data = dataset[found_idx]
-            support_data = data
-            query_data = data  # Use same image as support and query
+            # Load the found image as support
+            support_data = dataset[found_idx]
+            support_cat_id = support_data.get('category_id')
+            
+            # ========================================================================
+            # FOR OVERFITTING VISUALIZATION: Always use the SAME image as query
+            # ========================================================================
+            # When --single_image_path is provided, we want to visualize the model's
+            # predictions on the exact same image it was trained on. This shows how
+            # well the model memorized that specific image.
+            # ========================================================================
+            print(f"  ⚠️  Single-image mode: Using SAME image as both support and query (overfitting visualization)")
+            query_data = support_data
+            query_idx = found_idx
             
             # Prepare inputs
             query_image = query_data['image']
@@ -549,12 +565,13 @@ def visualize_from_checkpoint(args):
             pck_score = None
             if query_gt_coords and len(pred_keypoints) > 0:
                 from util.eval_utils import compute_pck_bbox
-                bbox_w = data.get('bbox_width', 512.0)
-                bbox_h = data.get('bbox_height', 512.0)
+                bbox_w = query_data.get('bbox_width', 512.0)
+                bbox_h = query_data.get('bbox_height', 512.0)
                 num_kpts = min(len(pred_keypoints), len(query_gt_coords))
                 pred_kpts_trimmed = pred_keypoints[:num_kpts]
                 gt_kpts_trimmed = query_gt_coords[:num_kpts]
-                vis_trimmed = support_visibility[:num_kpts]
+                query_visibility = query_data.get('visibility', [1] * len(query_gt_coords))
+                vis_trimmed = query_visibility[:num_kpts]
                 
                 pck_score, num_correct, num_visible = compute_pck_bbox(
                     pred_keypoints=np.array(pred_kpts_trimmed),
@@ -573,14 +590,14 @@ def visualize_from_checkpoint(args):
             else:
                 vis_support_image = support_data['image']
             
-            if isinstance(data['image'], torch.Tensor):
-                vis_query_image = data['image'].permute(1, 2, 0).numpy()
+            if isinstance(query_data['image'], torch.Tensor):
+                vis_query_image = query_data['image'].permute(1, 2, 0).numpy()
                 vis_query_image = (vis_query_image * 255).astype(np.uint8)
             else:
-                vis_query_image = data['image']
+                vis_query_image = query_data['image']
             
-            # Visualize
-            save_path = output_dir / f"single_image_{single_image_path.stem}.png"
+            # Visualize (include checkpoint epoch in filename to distinguish different checkpoints)
+            save_path = output_dir / f"single_image_{single_image_path.stem}_epoch{checkpoint_epoch}.png"
             visualize_pose_prediction(
                 support_image=vis_support_image,
                 query_image=vis_query_image,
