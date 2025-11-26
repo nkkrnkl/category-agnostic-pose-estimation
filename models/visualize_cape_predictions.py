@@ -92,7 +92,7 @@ def load_model(checkpoint_path):
     return model, train_args
 
 
-def decode_sequence_to_keypoints(pred_tokens, pred_coords, tokenizer):
+def decode_sequence_to_keypoints(pred_tokens, pred_coords, tokenizer, max_keypoints=None):
     """
     Decode predicted token sequence to keypoint coordinates.
 
@@ -100,6 +100,7 @@ def decode_sequence_to_keypoints(pred_tokens, pred_coords, tokenizer):
         pred_tokens: (seq_len,) Token predictions
         pred_coords: (seq_len, 2) Coordinate predictions
         tokenizer: Tokenizer for decoding
+        max_keypoints: Optional maximum number of keypoints to extract (stops early if reached)
 
     Returns:
         keypoints: List of (x, y) coordinates
@@ -107,6 +108,10 @@ def decode_sequence_to_keypoints(pred_tokens, pred_coords, tokenizer):
     keypoints = []
 
     for i in range(len(pred_tokens)):
+        # Stop if we've reached the maximum number of keypoints
+        if max_keypoints is not None and len(keypoints) >= max_keypoints:
+            break
+            
         token = pred_tokens[i].item()
 
         # Check if this is a coordinate token
@@ -114,7 +119,12 @@ def decode_sequence_to_keypoints(pred_tokens, pred_coords, tokenizer):
             # Coordinates are at the SAME position as the coord token
             if i < len(pred_coords):
                 x, y = pred_coords[i]  # pred_coords stores denormalized values
-                keypoints.append((x.item(), y.item()))
+                x_val, y_val = x.item(), y.item()
+                
+                # Filter out invalid coordinates (NaN, Inf, or out of reasonable bounds)
+                if (np.isfinite(x_val) and np.isfinite(y_val) and 
+                    -1e6 < x_val < 1e6 and -1e6 < y_val < 1e6):
+                    keypoints.append((x_val, y_val))
 
         # Stop at EOS token
         elif token == TokenType.eos.value:
@@ -445,7 +455,9 @@ def visualize_from_checkpoint(args):
                                 add_cls=getattr(train_args, 'add_cls_token', False)
                             )
                             
-                            pred_keypoints = decode_sequence_to_keypoints(pred_tokens, pred_coords, tokenizer)
+                            # Limit predictions to actual number of keypoints
+                            max_kpts = len(query_gt_coords) if query_gt_coords else None
+                            pred_keypoints = decode_sequence_to_keypoints(pred_tokens, pred_coords, tokenizer, max_keypoints=max_kpts)
                             
                             # Compute PCK
                             pck_score = None
@@ -529,7 +541,9 @@ def visualize_from_checkpoint(args):
             pred_coords = predictions['coordinates'][0].cpu()
             
             tokenizer = dataset.tokenizer
-            pred_keypoints = decode_sequence_to_keypoints(pred_tokens, pred_coords, tokenizer)
+            # Limit predictions to actual number of keypoints
+            max_kpts = len(query_gt_coords) if query_gt_coords else None
+            pred_keypoints = decode_sequence_to_keypoints(pred_tokens, pred_coords, tokenizer, max_keypoints=max_kpts)
             
             # Compute PCK
             pck_score = None
@@ -723,7 +737,9 @@ def visualize_from_checkpoint(args):
 
             # Extract keypoints from sequence
             tokenizer = dataset.tokenizer
-            pred_keypoints = decode_sequence_to_keypoints(pred_tokens, pred_coords, tokenizer)
+            # Limit predictions to actual number of keypoints
+            max_kpts = len(query_gt_coords) if query_gt_coords else None
+            pred_keypoints = decode_sequence_to_keypoints(pred_tokens, pred_coords, tokenizer, max_keypoints=max_kpts)
 
             # Compute PCK if we have ground truth
             pck_score = None
