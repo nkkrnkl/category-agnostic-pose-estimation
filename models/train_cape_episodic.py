@@ -761,22 +761,54 @@ def main(args):
     #
     # This is the CORRECT approach for category-agnostic pose estimation:
     #   Training = seen categories, Validation = unseen categories, Test = held-out unseen
+    #
+    # EXCEPTION: In single-image debug mode, use the SAME image for validation
+    #   → Perfect for overfitting tests (verify model can memorize one image)
+    #   → Same image used as both support and query (self-supervised)
     # ========================================================================
     
     val_episodes = max(1, args.episodes_per_epoch // 10)  # At least 1 episode
-    val_loader = build_episodic_dataloader(
-        base_dataset=val_dataset,  # Use validation images with validation categories
-        category_split_file=str(category_split_file),
-        split='val',  # Use VALIDATION categories (unseen during training!)
-        batch_size=1,  # CRITICAL: batch_size=1 to ensure all queries in a batch are from the SAME category
-                       # Each category may have different num_keypoints (e.g., 9 vs 17)
-                       # Model outputs fixed-length sequence based on max keypoints seen
-                       # To avoid shape mismatches during PCK evaluation, keep batch_size=1 for validation
-        num_queries_per_episode=args.num_queries_per_episode,
-        episodes_per_epoch=val_episodes,
-        num_workers=args.num_workers,
-        seed=args.seed + 999  # Different seed for diversity
-    )
+    
+    # In single-image mode, use the same image and dataset for validation
+    if single_image_mode:
+        print("\n" + "=" * 80)
+        print("⚠️  SINGLE IMAGE VALIDATION MODE")
+        print("=" * 80)
+        print(f"Validation will use the SAME image as training:")
+        print(f"  - Image index: {single_image_idx}")
+        print(f"  - Category ID: {single_image_category}")
+        print(f"  - Same image used as both support and query (self-supervised)")
+        print(f"  - Purpose: Verify model can perfectly memorize single image")
+        print("=" * 80 + "\n")
+        
+        # Use train_dataset (which contains the single image) for validation
+        val_loader = build_episodic_dataloader(
+            base_dataset=train_dataset,  # Use same dataset as training (contains the single image)
+            category_split_file=str(category_split_file),
+            split='train',  # Split doesn't matter in single-image mode, but use 'train' for consistency
+            batch_size=1,  # Single image per batch
+            num_queries_per_episode=args.num_queries_per_episode,
+            episodes_per_epoch=val_episodes,
+            num_workers=args.num_workers,
+            seed=args.seed + 999,  # Different seed for diversity
+            debug_single_image=single_image_idx,  # Use same image index
+            debug_single_image_category=single_image_category  # Use same category
+        )
+    else:
+        # Normal mode: Use unseen validation categories
+        val_loader = build_episodic_dataloader(
+            base_dataset=val_dataset,  # Use validation images with validation categories
+            category_split_file=str(category_split_file),
+            split='val',  # Use VALIDATION categories (unseen during training!)
+            batch_size=1,  # CRITICAL: batch_size=1 to ensure all queries in a batch are from the SAME category
+                           # Each category may have different num_keypoints (e.g., 9 vs 17)
+                           # Model outputs fixed-length sequence based on max keypoints seen
+                           # To avoid shape mismatches during PCK evaluation, keep batch_size=1 for validation
+            num_queries_per_episode=args.num_queries_per_episode,
+            episodes_per_epoch=val_episodes,
+            num_workers=args.num_workers,
+            seed=args.seed + 999  # Different seed for diversity
+        )
 
     print(f"Train episodes/epoch: {len(train_loader) * args.batch_size}")
     print(f"Val episodes/epoch: {len(val_loader) * args.batch_size}")
@@ -808,8 +840,10 @@ def main(args):
     # CRITICAL FIX: Initialize best-model tracking and RNG state restoration
     # ========================================================================
     # These will be updated if resuming from a checkpoint
-    # Note: Validation uses autoregressive inference on UNSEEN categories,
-    # so PCK is the primary metric (no validation loss)
+    # Note: Validation uses autoregressive inference
+    #   - Normal mode: UNSEEN categories (true generalization metric)
+    #   - Single-image mode: SAME image (overfitting test metric)
+    # PCK is the primary metric (no validation loss)
     best_pck = 0.0
     epochs_without_improvement = 0
     
@@ -928,7 +962,10 @@ def main(args):
         # Validation uses autoregressive inference (no loss, only PCK)
         val_pck = val_stats.get('pck', 0.0)
         val_pck_mean = val_stats.get('pck_mean_categories', 0.0)
-        print(f"  Val PCK@0.2:      {val_pck:.2%} (autoregressive)")
+        if single_image_mode:
+            print(f"  Val PCK@0.2:      {val_pck:.2%} (same image, autoregressive)")
+        else:
+            print(f"  Val PCK@0.2:      {val_pck:.2%} (unseen categories, autoregressive)")
         print(f"    - Mean PCK:     {val_pck_mean:.2%} (across categories)")
         
         print(f"  Learning Rate:    {optimizer.param_groups[0]['lr']:.6f}")
@@ -1036,12 +1073,15 @@ def main(args):
         
         # Report progress (early stopping based on PCK)
         if not pck_improved:
-            # No improvement in PCK (pose accuracy on unseen categories)
+            # No improvement in PCK
             epochs_without_improvement += 1
             print(f"  → No improvement in PCK for {epochs_without_improvement} epoch(s)")
             print(f"     Best PCK:    {best_pck:.4f}")
             print(f"     Current PCK: {val_pck:.4f}")
-            print(f"     (on {val_stats.get('pck_num_visible', 0)} visible keypoints across unseen validation categories)")
+            if single_image_mode:
+                print(f"     (on {val_stats.get('pck_num_visible', 0)} visible keypoints - same image validation)")
+            else:
+                print(f"     (on {val_stats.get('pck_num_visible', 0)} visible keypoints across unseen validation categories)")
             
             # Check early stopping (based on PCK for pose estimation)
             if args.early_stopping_patience > 0 and epochs_without_improvement >= args.early_stopping_patience:
@@ -1062,10 +1102,16 @@ def main(args):
         print("Training Complete!")
         print(f"Completed all {args.epochs} epochs")
     print("=" * 80)
-    print(f"Best PCK (on unseen val categories): {best_pck:.4f}")
+    if single_image_mode:
+        print(f"Best PCK (on same image): {best_pck:.4f}")
+    else:
+        print(f"Best PCK (on unseen val categories): {best_pck:.4f}")
     print(f"Checkpoints saved to: {args.output_dir}")
     print(f"\nLook for:")
-    print(f"  - checkpoint_best_pck_*.pth   (highest PCK on unseen categories)")
+    if single_image_mode:
+        print(f"  - checkpoint_best_pck_*.pth   (highest PCK on same image)")
+    else:
+        print(f"  - checkpoint_best_pck_*.pth   (highest PCK on unseen categories)")
     print(f"  - checkpoint_e***.pth         (per-epoch checkpoints)")
     if early_stop_triggered:
         print(f"\nEarly stopping saved {args.epochs - epoch - 1} epochs of compute time!")
