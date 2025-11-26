@@ -87,7 +87,7 @@ def train_one_epoch_episodic(model: torch.nn.Module, criterion: torch.nn.Module,
     # mininterval: update at most once per 2 seconds
     # miniters: update at least every 20 iterations
     # ncols=None auto-detects terminal width
-    pbar = tqdm(data_loader, desc=f'Epoch {epoch}', leave=True, ncols=None,
+    pbar = tqdm(data_loader, desc=f'Epoch {epoch}', leave=True, ncols=None, 
                 mininterval=2.0, miniters=20)
     
     for batch_idx, batch in enumerate(pbar):
