@@ -192,6 +192,18 @@ class GeometricSupportEncoder(nn.Module):
         # 6. Transformer self-attention
         # support_mask: True = positions to ignore (mask out)
         # PyTorch convention: True = ignore
+
+        # DEBUG: Inspect effective keypoints per sample to catch empty supports
+        try:
+            unmasked_counts = (~support_mask).sum(dim=1)
+            print("[DEBUG GeometricSupportEncoder] support_coords shape:", tuple(support_coords.shape))
+            print("[DEBUG GeometricSupportEncoder] support_mask shape:", tuple(support_mask.shape))
+            print("[DEBUG GeometricSupportEncoder] unmasked keypoints per sample:",
+                  unmasked_counts.tolist())
+        except Exception:
+            # Avoid breaking training if debug logging fails for any reason
+            pass
+
         support_features = self.transformer_encoder(
             embeddings,
             src_key_padding_mask=support_mask
