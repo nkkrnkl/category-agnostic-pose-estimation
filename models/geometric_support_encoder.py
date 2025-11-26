@@ -178,11 +178,18 @@ class GeometricSupportEncoder(nn.Module):
         # Without this, shuffling keypoint order produces identical embeddings.
         embeddings = self.sequence_pos_encoding(embeddings)  # [bs, num_pts, hidden_dim]
         
+        # Interpret support_mask coming from dataloader:
+        #   - Current convention (episodic_sampler): True = VALID keypoint (visibility > 0)
+        #   - PyTorch Transformer expects src_key_padding_mask: True = PAD (to ignore)
+        # Convert once here so the rest of this module can use the correct semantics.
+        valid_mask = support_mask            # True = valid keypoint
+        pad_mask = ~valid_mask               # True = padding / invalid (for Transformer & GCN)
+        
         # 5. Optional GCN pre-encoding (from CapeX)
         if self.use_gcn_preenc and self.gcn_layers is not None:
             # Build adjacency matrix from skeleton
-            # Note: ~support_mask because adj_from_skeleton expects True=invalid
-            adj = adj_from_skeleton(num_pts, skeleton_edges, support_mask, device)
+            # adj_from_skeleton expects mask=True for INVALID / padded positions
+            adj = adj_from_skeleton(num_pts, skeleton_edges, pad_mask, device)
             # adj: [bs, 2, num_pts, num_pts]
             
             # Apply GCN layers sequentially
@@ -190,15 +197,15 @@ class GeometricSupportEncoder(nn.Module):
                 embeddings = gcn_layer(embeddings, adj)  # [bs, num_pts, hidden_dim]
         
         # 6. Transformer self-attention
-        # support_mask: True = positions to ignore (mask out)
+        # pad_mask: True = positions to ignore (mask out)
         # PyTorch convention: True = ignore
 
         # DEBUG: Inspect effective keypoints per sample to catch empty supports
         try:
-            unmasked_counts = (~support_mask).sum(dim=1)
+            unmasked_counts = valid_mask.sum(dim=1)
             print("[DEBUG GeometricSupportEncoder] support_coords shape:", tuple(support_coords.shape))
-            print("[DEBUG GeometricSupportEncoder] support_mask shape:", tuple(support_mask.shape))
-            print("[DEBUG GeometricSupportEncoder] unmasked keypoints per sample:",
+            print("[DEBUG GeometricSupportEncoder] valid_mask shape:", tuple(valid_mask.shape))
+            print("[DEBUG GeometricSupportEncoder] unmasked (valid) keypoints per sample:",
                   unmasked_counts.tolist())
         except Exception:
             # Avoid breaking training if debug logging fails for any reason
@@ -206,7 +213,7 @@ class GeometricSupportEncoder(nn.Module):
 
         support_features = self.transformer_encoder(
             embeddings,
-            src_key_padding_mask=support_mask
+            src_key_padding_mask=pad_mask
         )  # [bs, num_pts, hidden_dim]
         
         return support_features
