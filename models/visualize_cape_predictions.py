@@ -316,6 +316,20 @@ def visualize_from_checkpoint(args):
     
     print(f"✓ Model loaded and moved to {device}")
     print(f"  Checkpoint epoch: {checkpoint_epoch}")
+    
+    # Show checkpoint validation metrics if available
+    if 'val_pck' in checkpoint:
+        val_pck = checkpoint.get('val_pck', 0.0)
+        print(f"  Checkpoint validation PCK: {val_pck:.2%}")
+        if val_pck < 0.5:
+            print(f"  ⚠️  WARNING: Low validation PCK ({val_pck:.2%}) - this checkpoint may not be fully trained!")
+    elif 'val_stats' in checkpoint:
+        val_stats = checkpoint.get('val_stats', {})
+        val_pck = val_stats.get('pck', 0.0)
+        if val_pck > 0:
+            print(f"  Checkpoint validation PCK: {val_pck:.2%}")
+            if val_pck < 0.5:
+                print(f"  ⚠️  WARNING: Low validation PCK ({val_pck:.2%}) - this checkpoint may not be fully trained!")
 
     # Load dataset (use training args for dataset config)
     print(f"\nLoading MP-100 dataset...")
@@ -614,6 +628,16 @@ def visualize_from_checkpoint(args):
             print(f"  Saved to: {save_path}")
             if pck_score is not None:
                 print(f"  PCK@0.2: {pck_score:.2%}")
+                if pck_score < 0.5:
+                    print(f"\n  ⚠️  WARNING: Low PCK ({pck_score:.2%}) detected!")
+                    print(f"     This may indicate:")
+                    print(f"     1. The checkpoint is from an early epoch (before overfitting)")
+                    print(f"     2. The checkpoint was trained on a different image")
+                    print(f"     3. Training failed and you're using an old checkpoint")
+                    print(f"     4. Coordinate normalization mismatch")
+                    print(f"\n     Expected PCK for overfitted model: ~100%")
+                    print(f"     Current checkpoint epoch: {checkpoint_epoch}")
+                    print(f"     Check training logs to verify which checkpoint should be used.")
             return
     
     # Normal multi-image visualization
