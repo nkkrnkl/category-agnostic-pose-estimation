@@ -213,6 +213,92 @@ class TestGeometricSupportEncoder:
         out2 = encoder(coords, mask, skeleton)
         
         assert torch.allclose(out1, out2, atol=1e-6), "Should be deterministic in eval mode"
+    
+    # ========================================================================
+    # NEW TESTS FOR SEQUENCE POSITIONAL ENCODING
+    # ========================================================================
+    
+    def test_geometric_encoder_with_sequence_pe(self):
+        """Test encoder has sequence_pos_encoding module."""
+        encoder = GeometricSupportEncoder(hidden_dim=256, use_gcn_preenc=False)
+        coords = torch.rand(2, 10, 2)
+        mask = torch.zeros(2, 10).bool()
+        skeleton = [[[0, 1], [1, 2]] for _ in range(2)]
+        
+        out = encoder(coords, mask, skeleton)
+        assert out.shape == (2, 10, 256)
+        
+        # Verify sequence_pos_encoding module exists
+        assert hasattr(encoder, 'sequence_pos_encoding'), \
+            "Encoder should have sequence_pos_encoding attribute"
+    
+    def test_sequence_pe_affects_output(self):
+        """Test that sequence PE makes ordering matter."""
+        encoder = GeometricSupportEncoder(hidden_dim=256, use_gcn_preenc=False)
+        encoder.eval()  # Disable dropout for deterministic output
+        
+        # Same coordinates, different order
+        coords_ordered = torch.tensor([
+            [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]]
+        ])
+        coords_shuffled = torch.tensor([
+            [[0.5, 0.6], [0.1, 0.2], [0.3, 0.4]]
+        ])
+        
+        mask = torch.zeros(1, 3).bool()
+        skeleton = [[[0, 1], [1, 2]]]
+        
+        out_ordered = encoder(coords_ordered, mask, skeleton)
+        out_shuffled = encoder(coords_shuffled, mask, skeleton)
+        
+        # Outputs should be DIFFERENT due to sequence PE
+        # (spatial PE would be same, but sequence PE differs)
+        assert not torch.allclose(out_ordered, out_shuffled, atol=1e-3), \
+            "Different orderings should produce different outputs (sequence PE working)"
+    
+    def test_geometric_encoder_sequence_pe_with_gcn(self):
+        """Test sequence PE works with GCN pre-encoding."""
+        encoder = GeometricSupportEncoder(
+            hidden_dim=256,
+            use_gcn_preenc=True,
+            num_gcn_layers=2
+        )
+        coords = torch.rand(2, 10, 2)
+        mask = torch.zeros(2, 10).bool()
+        skeleton = [[[0, 1], [1, 2], [2, 3]] for _ in range(2)]
+        
+        out = encoder(coords, mask, skeleton)
+        assert out.shape == (2, 10, 256)
+        assert not torch.isnan(out).any()
+        assert not torch.isinf(out).any()
+    
+    def test_gradient_flow_with_sequence_pe(self):
+        """Test gradients flow through sequence PE."""
+        encoder = GeometricSupportEncoder(hidden_dim=256)
+        coords = torch.rand(2, 10, 2, requires_grad=True)
+        mask = torch.zeros(2, 10).bool()
+        skeleton = [[[0, 1], [1, 2]] for _ in range(2)]
+        
+        out = encoder(coords, mask, skeleton)
+        loss = out.sum()
+        loss.backward()
+        
+        assert coords.grad is not None, "Gradients should flow to coords"
+        assert encoder.coord_mlp[0].weight.grad is not None, "Gradients should reach MLP"
+        # Sequence PE has no learnable parameters (sinusoidal), so no grad check needed
+    
+    def test_sequence_pe_with_masked_keypoints(self):
+        """Test sequence PE works correctly with masked keypoints."""
+        encoder = GeometricSupportEncoder(hidden_dim=256)
+        coords = torch.rand(1, 10, 2)
+        mask = torch.zeros(1, 10).bool()
+        mask[0, 5] = True  # Mask one keypoint
+        skeleton = [[[0, 1], [1, 2]]]
+        
+        out = encoder(coords, mask, skeleton)
+        assert out.shape == (1, 10, 256)
+        assert not torch.isnan(out).any()
+        # Masked position should have output (sequence PE still applied, but masked in attention)
 
 
 def test_geometric_encoder_forward():

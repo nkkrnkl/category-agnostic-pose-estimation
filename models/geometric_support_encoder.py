@@ -16,7 +16,7 @@ import torch.nn as nn
 from typing import List, Optional
 
 from models.graph_utils import adj_from_skeleton, GCNLayer
-from models.positional_encoding import SinePositionalEncoding2D
+from models.positional_encoding import SinePositionalEncoding2D, PositionalEncoding1D
 
 
 class GeometricSupportEncoder(nn.Module):
@@ -24,9 +24,15 @@ class GeometricSupportEncoder(nn.Module):
     Geometry-only support pose graph encoder.
     
     Encodes support keypoints using only coordinates and skeleton structure,
-    without any textual descriptions. Combines coordinate embeddings,
-    sinusoidal positional encoding, optional graph convolution, and
-    transformer self-attention.
+    without any textual descriptions. Combines:
+    1. Coordinate embeddings (what are the coordinates?)
+    2. 2D spatial positional encoding (where in image space?)
+    3. 1D sequence positional encoding (which keypoint in ordering?)
+    4. Optional graph convolution (structural relationships)
+    5. Transformer self-attention (contextual understanding)
+    
+    This design follows the PhD student's recommendation that the transformer
+    must understand both the spatial position AND the sequential order of keypoints.
     
     Args:
         hidden_dim (int): Feature dimension (default: 256)
@@ -85,7 +91,17 @@ class GeometricSupportEncoder(nn.Module):
             scale=2 * 3.14159265359  # 2*pi
         )
         
-        # 3. Optional GCN pre-encoding layers (from CapeX)
+        # 3. 1D sequence positional encoding for keypoint ordering
+        # This encodes WHICH keypoint it is (0th, 1st, 2nd, ...) in the sequence,
+        # complementing the 2D spatial encoding which encodes WHERE it is (x, y).
+        # Following PhD recommendation: "positional encoding for the keypoint sequence"
+        self.sequence_pos_encoding = PositionalEncoding1D(
+            d_model=hidden_dim,
+            max_len=100,  # Max keypoints (MP-100 has ~17 max, 100 provides headroom)
+            dropout=0.0   # Don't dropout positional encodings (deterministic)
+        )
+        
+        # 4. Optional GCN pre-encoding layers (from CapeX)
         if use_gcn_preenc:
             self.gcn_layers = nn.ModuleList([
                 GCNLayer(
@@ -101,7 +117,7 @@ class GeometricSupportEncoder(nn.Module):
         else:
             self.gcn_layers = None
         
-        # 4. Transformer encoder for self-attention
+        # 5. Transformer encoder for self-attention
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=hidden_dim,
             nhead=nhead,
@@ -124,10 +140,11 @@ class GeometricSupportEncoder(nn.Module):
         
         Pipeline:
         1. Coordinate embedding: MLP(coords) → [bs, N, hidden_dim]
-        2. Positional encoding: SinePosEnc(coords) → [bs, N, hidden_dim]
-        3. Combine: coord_emb + pos_emb
-        4. Optional GCN: GCN(embeddings, adjacency)
-        5. Transformer: Self-attention with masking
+        2. 2D spatial PE: SinePosEnc2D(coords) → [bs, N, hidden_dim]
+        3. Combine: coord_emb + spatial_pe
+        4. 1D sequence PE: SinePosEnc1D(indices) → add to embeddings
+        5. Optional GCN: GCN(embeddings, adjacency)
+        6. Transformer: Self-attention with masking
         
         Args:
             support_coords (torch.Tensor): [bs, num_pts, 2] keypoint coordinates in [0, 1]
@@ -152,10 +169,16 @@ class GeometricSupportEncoder(nn.Module):
         # 2. Positional encoding (from CapeX)
         pos_emb = self.pos_encoding.forward_coordinates(support_coords)  # [bs, num_pts, hidden_dim]
         
-        # 3. Combine coordinate and positional information
+        # 3. Combine coordinate and spatial positional information
         embeddings = coord_emb + pos_emb  # [bs, num_pts, hidden_dim]
         
-        # 4. Optional GCN pre-encoding (from CapeX)
+        # 4. Add 1D sequence positional encoding
+        # This tells the transformer WHICH keypoint it is (0th, 1st, 2nd, ...)
+        # complementing the spatial PE which tells it WHERE it is (x, y).
+        # Without this, shuffling keypoint order produces identical embeddings.
+        embeddings = self.sequence_pos_encoding(embeddings)  # [bs, num_pts, hidden_dim]
+        
+        # 5. Optional GCN pre-encoding (from CapeX)
         if self.use_gcn_preenc and self.gcn_layers is not None:
             # Build adjacency matrix from skeleton
             # Note: ~support_mask because adj_from_skeleton expects True=invalid
@@ -166,7 +189,7 @@ class GeometricSupportEncoder(nn.Module):
             for gcn_layer in self.gcn_layers:
                 embeddings = gcn_layer(embeddings, adj)  # [bs, num_pts, hidden_dim]
         
-        # 5. Transformer self-attention
+        # 6. Transformer self-attention
         # support_mask: True = positions to ignore (mask out)
         # PyTorch convention: True = ignore
         support_features = self.transformer_encoder(
@@ -180,6 +203,8 @@ class GeometricSupportEncoder(nn.Module):
         """String representation of the module."""
         gcn_str = f", use_gcn_preenc=True ({len(self.gcn_layers)} layers)" if self.use_gcn_preenc else ""
         return (f'{self.__class__.__name__}('
-                f'hidden_dim={self.hidden_dim}'
+                f'hidden_dim={self.hidden_dim}, '
+                f'spatial_pe=SinePE2D, '
+                f'sequence_pe=SinePE1D'
                 f'{gcn_str})')
 

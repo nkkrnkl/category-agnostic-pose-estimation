@@ -26,6 +26,8 @@ This folder contains all documentation for the Category-Agnostic Pose Estimation
 - **[DEBUG_OVERFIT_MODE.md](DEBUG_OVERFIT_MODE.md)** - 🎯 **NEW**: Single-category overfitting for debugging
 
 #### Model Architecture
+- **[CAPE_POSITIONAL_ENCODING_DESIGN.md](CAPE_POSITIONAL_Encoding_Design.md)** - ⭐ Dual positional encoding (spatial + sequence)
+- **[REFACTORING_STAGE_1_2_3_COMPLETE.md](REFACTORING_STAGE_1_2_3_COMPLETE.md)** - Geometry-only encoder refactoring (Stages 1-3.5)
 - **[CAPE_LOSSES_REFACTORING.md](CAPE_LOSSES_REFACTORING.md)** - How CAPE extends Raster2Seq loss functions
 - **[PCK_EVALUATION_IMPLEMENTATION.md](PCK_EVALUATION_IMPLEMENTATION.md)** - PCK metric implementation details
 
@@ -116,10 +118,12 @@ These documents track fixes for specific issues identified during audits:
 5. IMAGE_VALIDATION_FIX.md
 
 #### **Model Architecture**
-1. CAPE_IMPLEMENTATION_GUIDE.md
-2. CAPE_LOSSES_REFACTORING.md
-3. CORRECT_META_LEARNING_SETUP.md
-4. MULTI_INSTANCE_LIMITATION.md
+1. CAPE_POSITIONAL_ENCODING_DESIGN.md ⭐ **NEW** - Dual positional encoding
+2. REFACTORING_STAGE_1_2_3_COMPLETE.md - Geometry-only encoder
+3. CAPE_IMPLEMENTATION_GUIDE.md
+4. CAPE_LOSSES_REFACTORING.md
+5. CORRECT_META_LEARNING_SETUP.md
+6. MULTI_INSTANCE_LIMITATION.md
 
 #### **Training Pipeline**
 1. DEBUG_OVERFIT_MODE.md 🎯 **NEW** - Single-category debugging
@@ -205,9 +209,11 @@ These documents track fixes for specific issues identified during audits:
 
 ## 📅 Chronological Order (Latest First)
 
-1. **CRITICAL_SINGLE_KEYPOINT_BUG.md** - Critical autoregressive bug fix (Nov 25, 2025) 🚨
-2. **DEBUG_OVERFIT_MODE.md** - Single-category debugging mode (Nov 25, 2025) 🎯
-3. **TRAINING_INFERENCE_PIPELINE.md** - Training/inference audit (Nov 25, 2025) 🔥
+1. **CAPE_POSITIONAL_ENCODING_DESIGN.md** - Sequence positional encoding integration (Nov 26, 2025) ⭐
+2. **REFACTORING_STAGE_1_2_3_COMPLETE.md** - Stage 3.5 completion (Nov 26, 2025)
+3. **CRITICAL_SINGLE_KEYPOINT_BUG.md** - Critical autoregressive bug fix (Nov 25, 2025) 🚨
+4. **DEBUG_OVERFIT_MODE.md** - Single-category debugging mode (Nov 25, 2025) 🎯
+5. **TRAINING_INFERENCE_PIPELINE.md** - Training/inference audit (Nov 25, 2025) 🔥
 4. **AUDIT_COMPLETE_REPORT.md** - Full audit verification report
 3. **TRAINING_INFERENCE_IO.md** - Complete I/O specification
 4. **DEBUG_AND_TESTING_GUIDE.md** - Debug mode and test suite
@@ -258,5 +264,5 @@ If you can't find what you're looking for:
 2. Use your editor's search to grep across all .md files
 3. Check **FINAL_FIX_SUMMARY.md** for recent changes
 
-Last updated: November 25, 2025 (Critical Single-Keypoint Bug Fixed ✅)
+Last updated: November 26, 2025 (Sequence Positional Encoding Integrated ⭐)
 

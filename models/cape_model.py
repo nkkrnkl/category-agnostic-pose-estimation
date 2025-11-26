@@ -12,7 +12,7 @@ Key innovation: Uses coordinate sequences as support (vs. text in CapeX)
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from .support_encoder import SupportPoseGraphEncoder, SupportGraphAggregator
+from .support_encoder import SupportPoseGraphEncoder
 from .geometric_support_encoder import GeometricSupportEncoder
 
 
@@ -74,12 +74,6 @@ class CAPEModel(nn.Module):
                 dim_feedforward=1024,
                 dropout=0.1
             )
-
-        # Support graph aggregator (for global pose structure)
-        self.support_aggregator = SupportGraphAggregator(
-            hidden_dim=hidden_dim,
-            method='attention'
-        )
 
         # Support fusion layer (injected into decoder)
         if support_fusion_method == 'cross_attention':
@@ -215,10 +209,6 @@ class CAPEModel(nn.Module):
         #   support_features will be: (B, N_support, D)
         # where B = total number of queries (each with its own support)
         support_features = self.support_encoder(support_coords, support_mask, skeleton_edges)
-
-        # Global support representation (optional)
-        support_global = self.support_aggregator(support_features, support_mask)
-        # support_global: (B, D)
 
         # 2. Process query image through base model with support conditioning
         # We need to inject support features into the decoder

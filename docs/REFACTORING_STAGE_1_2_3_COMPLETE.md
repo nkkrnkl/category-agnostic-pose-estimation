@@ -583,6 +583,82 @@ Stages 1-3 successfully completed. The geometry-only CAPE model now has:
 
 ---
 
+## Stage 3.5: Add Sequence Positional Encoding (CRITICAL FIX)
+
+### Motivation
+
+After Stage 3 completion, a comprehensive positional encoding audit revealed a critical gap: the NEW `GeometricSupportEncoder` lacks 1D sequence positional encoding, which is essential for the transformer to understand keypoint ordering.
+
+The PhD student's guidance emphasized that "positional encoding for the keypoint sequence" is crucial for understanding vertex structure (e.g., head → neck → shoulders). The OLD `SupportPoseGraphEncoder` had this (line 141 in [models/support_encoder.py](../models/support_encoder.py)), but the NEW `GeometricSupportEncoder` only had 2D spatial positional encoding based on (x,y) coordinates, not sequence position.
+
+### Changes
+
+**File**: [models/geometric_support_encoder.py](../models/geometric_support_encoder.py)
+
+**Additions**:
+1. Import `PositionalEncoding1D` from `models.positional_encoding`
+2. Initialize `self.sequence_pos_encoding` in `__init__` (after line 86)
+3. Apply sequence PE in `forward` after spatial PE (after line 156)
+4. Update docstrings to reflect the new 3-component architecture
+5. Update `__repr__` to show both spatial and sequence PE
+
+**Result**: Support embeddings now contain THREE types of information:
+- **Content**: What are the coordinates? (coord_emb)
+- **Spatial**: Where in image space? (spatial_pe)
+- **Sequential**: Which keypoint in ordering? (sequence_pe) ← NEW
+
+### Pipeline Before and After
+
+**Before** (Stage 3):
+```
+1. Coordinate embedding: MLP(coords) → [bs, N, D]
+2. 2D spatial PE: SinePosEnc2D(coords) → [bs, N, D]
+3. Combine: coord_emb + spatial_pe
+4. Optional GCN: GCN(embeddings, adjacency)
+5. Transformer: Self-attention
+```
+
+**After** (Stage 3.5):
+```
+1. Coordinate embedding: MLP(coords) → [bs, N, D]
+2. 2D spatial PE: SinePosEnc2D(coords) → [bs, N, D]
+3. Combine: coord_emb + spatial_pe
+4. 1D sequence PE: SinePosEnc1D(indices) → add to embeddings  ← NEW
+5. Optional GCN: GCN(embeddings, adjacency)
+6. Transformer: Self-attention
+```
+
+### Validation
+
+All existing tests pass. New tests added in:
+- [tests/test_positional_encoding.py](../tests/test_positional_encoding.py) (NEW file, 10 tests)
+- [tests/test_geometric_support_encoder.py](../tests/test_geometric_support_encoder.py) (5 new tests added)
+
+**Key Test**: `test_sequence_pe_affects_output` verifies that different keypoint orderings produce different outputs, confirming sequence PE is working.
+
+**Test Results**:
+- 10/10 tests pass in `test_positional_encoding.py`
+- 20/20 tests pass in `test_geometric_support_encoder.py` (including 5 new)
+- 6/6 integration tests pass in `test_cape_model_integration.py`
+
+### Documentation
+
+See [CAPE_Positional_Encoding_Design.md](./CAPE_Positional_Encoding_Design.md) for full design rationale, including:
+- Why transformers need positional encoding for keypoint sequences
+- Comparison with CapeX approach
+- Design decisions (sinusoidal vs. learned, additive vs. concatenated)
+- Validation strategy
+
+### Impact
+
+This fix addresses a fundamental architectural gap:
+- **Without sequence PE**: Model only knows WHERE keypoints are (spatial position)
+- **With sequence PE**: Model knows BOTH where keypoints are AND which keypoint it is
+
+This aligns with the PhD student's recommendation and combines the best of CapeX (spatial PE for coordinates) with transformer best practices (sequence PE for ordering).
+
+---
+
 ## Quick Start
 
 To test the new encoder immediately:
