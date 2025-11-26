@@ -51,7 +51,16 @@ def adj_from_skeleton(num_pts, skeleton, mask, device='cuda'):
         edges = torch.tensor(skeleton[b], device=device)
         adj = torch.zeros(num_pts, num_pts, device=device)
         if len(edges) > 0:  # Only add edges if skeleton is non-empty
-            adj[edges[:, 0], edges[:, 1]] = 1
+            # CRITICAL FIX: Filter out edges with indices >= num_pts
+            # This can happen when skeleton definition has more keypoints than actual instance
+            # (e.g., category has 20 keypoints but instance only has 15 annotated)
+            # This is expected behavior - skeleton is the category-level structure,
+            # but individual instances may have fewer visible/annotated keypoints.
+            valid_mask = (edges[:, 0] < num_pts) & (edges[:, 1] < num_pts)
+            valid_edges = edges[valid_mask]
+            
+            if len(valid_edges) > 0:
+                adj[valid_edges[:, 0], valid_edges[:, 1]] = 1
         adj_mx = torch.concatenate((adj_mx, adj.unsqueeze(0)), dim=0)
     
     # Make symmetric (undirected graph)
