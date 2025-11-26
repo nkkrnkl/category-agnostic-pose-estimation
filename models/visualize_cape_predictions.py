@@ -334,27 +334,33 @@ def visualize_from_checkpoint(args):
     print(f"Samples per category: {args.num_samples}")
     print()
 
-    # Sample and visualize
+    # OPTIMIZATION: Get category info directly from COCO annotations instead of loading all images
+    # This avoids slow GCS file access when iterating through thousands of images
+    print("Grouping images by category from annotations (fast method)...")
     category_samples = defaultdict(list)
-
-    # Group samples by category (skip missing images)
-    skipped_count = 0
-    for idx in range(len(dataset)):
-        try:
-            data = dataset[idx]
-            cat_id = data['category_id']
+    
+    # Use COCO annotations directly to get image->category mapping
+    # This is much faster than loading each image from GCS
+    coco = dataset.coco
+    for idx, img_id in enumerate(dataset.ids):
+        # Get annotations for this image
+        ann_ids = coco.getAnnIds(imgIds=img_id)
+        if len(ann_ids) == 0:
+            continue
+        
+        anns = coco.loadAnns(ann_ids)
+        # Get category from first annotation (we use first instance per image)
+        if len(anns) > 0 and 'category_id' in anns[0]:
+            cat_id = anns[0]['category_id']
             
             # Filter to requested categories
             if args.categories is not None and cat_id not in args.categories:
                 continue
-                
+            
             category_samples[cat_id].append(idx)
-        except ImageNotFoundError:
-            skipped_count += 1
-            continue
     
-    if skipped_count > 0:
-        print(f"Note: Skipped {skipped_count} missing images during dataset iteration")
+    total_images = sum(len(indices) for indices in category_samples.values())
+    print(f"✓ Grouped {total_images} images into {len(category_samples)} categories")
 
     # Visualize samples
     total_visualized = 0

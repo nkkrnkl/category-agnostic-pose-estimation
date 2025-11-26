@@ -892,7 +892,9 @@ def build_mp100_cape(image_set, args):
             # Helps with images that may be slightly out of focus
             A.GaussianBlur(
                 blur_limit=(3, 5),  # Small kernel size (3x3 or 5x5)
-                sigma_limit=0,      # Auto-select sigma based on kernel
+                # Set sigma_limit to prevent divide by zero (sigma must be > 0)
+                # For kernel sizes 3-5, sigma should be in range 0.1 to 2.0
+                sigma_limit=(0.1, 2.0),  # Minimum 0.1 to avoid divide by zero
                 p=0.2               # Apply 20% of the time (less frequent)
             ),
             

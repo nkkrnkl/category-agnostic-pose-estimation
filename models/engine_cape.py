@@ -84,10 +84,12 @@ def train_one_epoch_episodic(model: torch.nn.Module, criterion: torch.nn.Module,
     optimizer.zero_grad()
 
     # Wrap data_loader with tqdm for progress bar
-    # mininterval: update at most once per 2 seconds
-    # miniters: update at least every 20 iterations
+    # For small epoch sizes (e.g., 20 episodes), use more frequent updates
+    # mininterval: update at most once per 0.5 seconds (allows smooth updates)
+    # miniters: update at least every iteration (for small epoch sizes)
+    # This prevents the progress bar from appearing stuck with only 20 iterations
     pbar = tqdm(data_loader, desc=f'Epoch {epoch}', leave=True, ncols=100, 
-                mininterval=2.0, miniters=20)
+                mininterval=0.5, miniters=1)
     
     for batch_idx, batch in enumerate(pbar):
         # ========================================================================
@@ -161,7 +163,8 @@ def train_one_epoch_episodic(model: torch.nn.Module, criterion: torch.nn.Module,
         # ========================================================================
         use_amp = scaler is not None and device.type == 'cuda'
         
-        with torch.cuda.amp.autocast(enabled=use_amp):
+        # Use new autocast API (torch.amp.autocast) instead of deprecated torch.cuda.amp.autocast
+        with torch.amp.autocast(device_type='cuda', enabled=use_amp):
             # Forward pass
             # Model expects query images and support conditioning (including skeleton edges)
             outputs = model(
