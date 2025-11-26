@@ -5,8 +5,10 @@ This module provides functions to extract keypoints from model-generated
 sequences, handling token types and coordinate filtering.
 """
 
+import os
 import torch
 from typing import Optional
+from datasets.token_types import TokenType
 
 
 def extract_keypoints_from_predictions(
@@ -50,7 +52,34 @@ def extract_keypoints_from_predictions(
         # Extract coordinate tokens based on PREDICTED types
         # TokenType.coord.value is 0, which indicates a coordinate token
         coord_mask = pred_token_types[i] == TokenType.coord.value
-        kpts = pred_coords[i][coord_mask]
+        
+        # DEBUG
+        DEBUG_EXTRACT = os.environ.get('DEBUG_EXTRACT', '0') == '1'
+        if DEBUG_EXTRACT and i < 2:
+            print(f"\n[DEBUG extract_keypoints_from_predictions] Sample {i}:")
+            print(f"  pred_coords[i] shape: {pred_coords[i].shape}")
+            print(f"  coord_mask shape: {coord_mask.shape}")
+            print(f"  coord_mask sum: {coord_mask.sum().item()}")
+        
+        try:
+            kpts = pred_coords[i][coord_mask]
+        except Exception as e:
+            print(f"\n❌ ERROR in extract_keypoints_from_predictions, sample {i}:")
+            print(f"   pred_coords[i].shape = {pred_coords[i].shape}")
+            print(f"   coord_mask.shape = {coord_mask.shape}")
+            print(f"   coord_mask.dtype = {coord_mask.dtype}")
+            print(f"   Error: {e}")
+            raise
+        
+        if DEBUG_EXTRACT and i < 2:
+            print(f"  kpts shape: {kpts.shape}")
+        
+        # Debug logging for keypoint count diagnostic
+        if os.environ.get('DEBUG_KEYPOINT_COUNT', '0') == '1' and i == 0:
+            print(f"[DIAG sequence_utils] Extracted {len(kpts)} keypoints from predicted sequence")
+            print(f"  Total tokens: {len(pred_token_types[i])}")
+            print(f"  COORD tokens: {(pred_token_types[i] == TokenType.coord.value).sum()}")
+            print(f"  max_keypoints param: {max_keypoints}")
         
         # Limit to max_keypoints if specified
         if max_keypoints is not None and len(kpts) > max_keypoints:

@@ -84,12 +84,11 @@ def train_one_epoch_episodic(model: torch.nn.Module, criterion: torch.nn.Module,
     optimizer.zero_grad()
 
     # Wrap data_loader with tqdm for progress bar
-    # For small epoch sizes (e.g., 20 episodes), use more frequent updates
-    # mininterval: update at most once per 0.5 seconds (allows smooth updates)
-    # miniters: update at least every iteration (for small epoch sizes)
-    # This prevents the progress bar from appearing stuck with only 20 iterations
-    pbar = tqdm(data_loader, desc=f'Epoch {epoch}', leave=True, ncols=100, 
-                mininterval=0.5, miniters=1)
+    # mininterval: update at most once per 2 seconds
+    # miniters: update at least every 20 iterations
+    # ncols=None auto-detects terminal width
+    pbar = tqdm(data_loader, desc=f'Epoch {epoch}', leave=True, ncols=None,
+                mininterval=2.0, miniters=20)
     
     for batch_idx, batch in enumerate(pbar):
         # ========================================================================
@@ -319,12 +318,42 @@ def extract_keypoints_from_sequence(
     for i in range(batch_size):
         # Get valid tokens for this instance
         valid_mask = mask[i]
-        valid_coords = pred_coords[i][valid_mask]
-        valid_labels = token_labels[i][valid_mask]
+        
+        # DEBUG
+        DEBUG_EXTRACT = os.environ.get('DEBUG_EXTRACT', '0') == '1'
+        if DEBUG_EXTRACT and i < 2:  # Show first 2 samples
+            print(f"\n[DEBUG extract_keypoints_from_sequence] Sample {i}:")
+            print(f"  pred_coords[i] shape: {pred_coords[i].shape}")
+            print(f"  valid_mask shape: {valid_mask.shape}")
+            print(f"  valid_mask sum: {valid_mask.sum().item()}")
+            print(f"  valid_mask dtype: {valid_mask.dtype}")
+        
+        try:
+            valid_coords = pred_coords[i][valid_mask]
+            valid_labels = token_labels[i][valid_mask]
+        except Exception as e:
+            print(f"\n❌ ERROR on line 'valid_coords = pred_coords[i][valid_mask]':")
+            print(f"   Sample index i={i}")
+            print(f"   pred_coords[i].shape = {pred_coords[i].shape}")
+            print(f"   valid_mask.shape = {valid_mask.shape}")
+            print(f"   valid_mask.dtype = {valid_mask.dtype}")
+            print(f"   Error: {e}")
+            raise
+        
+        if DEBUG_EXTRACT and i < 2:
+            print(f"  After boolean indexing:")
+            print(f"    valid_coords shape: {valid_coords.shape}")
+            print(f"    valid_labels shape: {valid_labels.shape}")
         
         # Extract only coordinate tokens (TokenType.coord = 0)
         coord_mask = valid_labels == TokenType.coord.value
         kpts = valid_coords[coord_mask]
+        
+        if DEBUG_EXTRACT and i < 2:
+            print(f"  After coord filtering:")
+            print(f"    coord_mask shape: {coord_mask.shape}")
+            print(f"    coord_mask sum: {coord_mask.sum().item()}")
+            print(f"    kpts shape: {kpts.shape}")
         
         # Limit to max_keypoints if specified
         if max_keypoints is not None and len(kpts) > max_keypoints:
@@ -381,7 +410,7 @@ def evaluate_cape(model, criterion, data_loader, device, compute_pck=True, pck_t
     # Wrap data_loader with tqdm for progress bar
     # mininterval: update at most once per 2 seconds
     # miniters: update at least every 10 iterations
-    pbar = tqdm(data_loader, desc='Validation (Autoregressive)', leave=True, ncols=100,
+    pbar = tqdm(data_loader, desc='Validation (Autoregressive)', leave=True, ncols=None,
                 mininterval=2.0, miniters=10)
     
     for batch_idx, batch in enumerate(pbar):
@@ -479,10 +508,58 @@ def evaluate_cape(model, criterion, data_loader, device, compute_pck=True, pck_t
             print(f"  Support coords shape: {support_coords.shape}")
             print(f"  Predictions shape: {predictions.get('coordinates', torch.zeros(1)).shape}")
         
-        # Convert predictions to outputs format for loss computation (if needed)
+        # ========================================================================
+        # CRITICAL FIX: Pad autoregressive predictions to match target length
+        # ========================================================================
+        # Problem: Autoregressive inference generates variable-length sequences
+        #          (e.g., 18 tokens when EOS predicted early), but targets have
+        #          fixed length (200 tokens). This causes shape mismatch in loss.
+        #
+        # Solution: Pad predictions to target length before computing loss.
+        #          The visibility mask will ensure padding doesn't affect loss.
+        # ========================================================================
+        pred_logits = predictions.get('logits', None)
+        pred_coords = predictions.get('coordinates', None)
+        
+        if pred_logits is not None and pred_coords is not None:
+            batch_size, pred_seq_len = pred_logits.shape[:2]
+            target_seq_len = query_targets['target_seq'].shape[1]
+            
+            if pred_seq_len < target_seq_len:
+                # Pad predictions to match target length
+                pad_len = target_seq_len - pred_seq_len
+                
+                # Pad logits with padding token logits (all zeros except padding class)
+                vocab_size = pred_logits.shape[-1]
+                pad_logits = torch.zeros(
+                    batch_size, pad_len, vocab_size,
+                    dtype=pred_logits.dtype,
+                    device=pred_logits.device
+                )
+                # Set padding class to high value (if we know the padding token index)
+                # For now, leave as zeros (the mask will exclude these from loss anyway)
+                
+                pred_logits_padded = torch.cat([pred_logits, pad_logits], dim=1)
+                
+                # Pad coordinates with zeros
+                pad_coords = torch.zeros(
+                    batch_size, pad_len, 2,
+                    dtype=pred_coords.dtype,
+                    device=pred_coords.device
+                )
+                pred_coords_padded = torch.cat([pred_coords, pad_coords], dim=1)
+            else:
+                # No padding needed (or predictions longer than targets - shouldn't happen)
+                pred_logits_padded = pred_logits[:, :target_seq_len]
+                pred_coords_padded = pred_coords[:, :target_seq_len]
+        else:
+            pred_logits_padded = pred_logits
+            pred_coords_padded = pred_coords
+        
+        # Convert predictions to outputs format for loss computation
         outputs = {
-            'pred_coords': predictions.get('coordinates', None),
-            'pred_logits': predictions.get('logits', None)
+            'pred_coords': pred_coords_padded,
+            'pred_logits': pred_logits_padded
         }
         
         # Compute loss if criterion and logits available
@@ -512,11 +589,12 @@ def evaluate_cape(model, criterion, data_loader, device, compute_pck=True, pck_t
             val_loss = 0.0
             loss_dict_reduced_scaled = {}
         
-        # Update tqdm progress bar with current PCK if available
+        # Update tqdm progress bar with current metrics
         if compute_pck and pck_evaluator is not None:
             current_results = pck_evaluator.get_results()
             pbar.set_postfix({
                 'PCK': f'{current_results["pck_overall"]:.2%}',
+                'loss': f'{val_loss:.4f}',
                 'correct': current_results['total_correct'],
                 'visible': current_results['total_visible']
             })
@@ -557,8 +635,16 @@ def evaluate_cape(model, criterion, data_loader, device, compute_pck=True, pck_t
                     if pred_logits is not None:
                         # Use model's predicted token types
                         from util.sequence_utils import extract_keypoints_from_predictions
+                        # ================================================================
+                        # CRITICAL FIX: Don't limit max_keypoints during extraction
+                        # ================================================================
+                        # BUG: max_keypoints=gt_kpts.shape[1] artificially limits extraction
+                        #      If model predicts fewer keypoints (e.g., 14 for a 17-kpt category),
+                        #      we can't "add" them back during trimming later.
+                        # FIX: Extract ALL predicted keypoints, then trim per-category below
+                        # ================================================================
                         pred_kpts = extract_keypoints_from_predictions(
-                            pred_coords, pred_logits, max_keypoints=gt_kpts.shape[1]
+                            pred_coords, pred_logits, max_keypoints=None  # Extract all
                         )
                     else:
                         # Fallback if logits not available
@@ -649,10 +735,51 @@ def evaluate_cape(model, criterion, data_loader, device, compute_pck=True, pck_t
                             vis = meta.get('visibility', [])
                             num_kpts_for_category = len(vis)  # Actual number of keypoints for this category
                             
-                            # Trim predictions and ground truth to match this category's keypoint count
-                            # This handles variable-length sequences across different MP-100 categories
-                            pred_kpts_trimmed.append(pred_kpts[idx, :num_kpts_for_category, :])  # (num_kpts, 2)
-                            gt_kpts_trimmed.append(gt_kpts[idx, :num_kpts_for_category, :])      # (num_kpts, 2)
+                            # ================================================================
+                            # CRITICAL: Handle keypoint count mismatches
+                            # ================================================================
+                            pred_count = pred_kpts[idx].shape[0]
+                            expected_count = num_kpts_for_category
+                            
+                            if pred_count > expected_count + 10 and batch_idx == 0 and idx == 0:
+                                import warnings
+                                warnings.warn(
+                                    f"⚠️  Model generated {pred_count} keypoints but expected {expected_count}. "
+                                    f"Excess: {pred_count - expected_count}. Model likely didn't learn EOS properly."
+                                )
+                            
+                            # ================================================================
+                            # CRITICAL FIX: Pad or trim predictions to match GT count
+                            # ================================================================
+                            # Case 1: Model predicted MORE keypoints than category has
+                            #   → Trim to expected count
+                            # Case 2: Model predicted FEWER keypoints than category has
+                            #   → Pad with zeros (treat as incorrect predictions)
+                            # ================================================================
+                            if pred_count >= expected_count:
+                                # Trim excess predictions
+                                pred_kpts_trimmed.append(pred_kpts[idx, :expected_count, :])
+                            else:
+                                # Pad with zeros if model predicted too few
+                                pred_sample = pred_kpts[idx]  # (pred_count, 2)
+                                padding = torch.zeros(
+                                    expected_count - pred_count, 2,
+                                    dtype=pred_sample.dtype,
+                                    device=pred_sample.device
+                                )
+                                pred_padded = torch.cat([pred_sample, padding], dim=0)  # (expected_count, 2)
+                                pred_kpts_trimmed.append(pred_padded)
+                                
+                                if batch_idx == 0 and idx == 0:
+                                    import warnings
+                                    warnings.warn(
+                                        f"⚠️  Model only generated {pred_count}/{expected_count} keypoints. "
+                                        f"Padding {expected_count - pred_count} with zeros (will hurt PCK)."
+                                    )
+                            
+                            # Trim GT to match category keypoint count (should already match, but be safe)
+                            gt_kpts_trimmed.append(gt_kpts[idx, :expected_count, :])
+                            # ================================================================
                             
                             visibility_list.append(vis)
                         
@@ -774,7 +901,7 @@ def evaluate_unseen_categories(
     # Wrap data_loader with tqdm for progress bar
     # mininterval: update at most once per 2 seconds
     # miniters: update at least every 10 iterations
-    pbar = tqdm(data_loader, desc=f'Test (Unseen) PCK@{pck_threshold}', leave=True, ncols=100,
+    pbar = tqdm(data_loader, desc=f'Test (Unseen) PCK@{pck_threshold}', leave=True, ncols=None,
                 mininterval=2.0, miniters=10)
     
     for batch_idx, batch in enumerate(pbar):

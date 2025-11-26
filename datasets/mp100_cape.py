@@ -692,6 +692,10 @@ class MP100CAPE(torch.utils.data.Dataset):
         # Quantize coordinates using bilinear interpolation
         num_bins = self.tokenizer.num_bins
         quant_poly = [poly * (num_bins - 1) for poly in polygons]
+        
+        # Clamp quantized coordinates to valid range [0, num_bins-1]
+        # This prevents out-of-bounds issues when augmentation pushes coords > 1.0
+        quant_poly = [np.clip(poly, 0, num_bins - 1) for poly in quant_poly]
 
         # ========================================================================
         # CRITICAL FIX #2: Bilinear interpolation requires 4 sequences
@@ -710,11 +714,23 @@ class MP100CAPE(torch.utils.data.Dataset):
         # duplicates. They are NOT - they are required for bilinear interpolation!
         # ========================================================================
 
-        # 4 indices for bilinear interpolation (floor/ceil combinations)
-        index11 = [[math.floor(p[0])*num_bins + math.floor(p[1]) for p in poly] for poly in quant_poly]
-        index21 = [[math.ceil(p[0])*num_bins + math.floor(p[1]) for p in poly] for poly in quant_poly]
-        index12 = [[math.floor(p[0])*num_bins + math.ceil(p[1]) for p in poly] for poly in quant_poly]
-        index22 = [[math.ceil(p[0])*num_bins + math.ceil(p[1]) for p in poly] for poly in quant_poly]
+        # ========================================================================
+        # CRITICAL FIX #3: Clamp indices to prevent vocab overflow
+        # ========================================================================
+        # Problem: Data augmentation can push coordinates slightly > 1.0
+        #          Example: coord = 1.001 -> quantized = 1.001 * 43 = 43.043
+        #          Then: ceil(43.043) = 44, and 44 * 44 = 1936 (BOS token!)
+        #          This causes CUDA index out of bounds errors.
+        #
+        # Solution: Clamp floor/ceil values to [0, num_bins-1] before computing
+        #           the flattened 2D index. This ensures indices stay in [0, 1935].
+        # ========================================================================
+        
+        # 4 indices for bilinear interpolation (floor/ceil combinations with clamping)
+        index11 = [[min(num_bins-1, max(0, math.floor(p[0])))*num_bins + min(num_bins-1, max(0, math.floor(p[1]))) for p in poly] for poly in quant_poly]
+        index21 = [[min(num_bins-1, max(0, math.ceil(p[0])))*num_bins + min(num_bins-1, max(0, math.floor(p[1]))) for p in poly] for poly in quant_poly]
+        index12 = [[min(num_bins-1, max(0, math.floor(p[0])))*num_bins + min(num_bins-1, max(0, math.ceil(p[1]))) for p in poly] for poly in quant_poly]
+        index22 = [[min(num_bins-1, max(0, math.ceil(p[0])))*num_bins + min(num_bins-1, max(0, math.ceil(p[1]))) for p in poly] for poly in quant_poly]
 
         # Tokenize all 4 sequences
         seq11 = self.tokenizer(index11, add_bos=True, add_eos=False, dtype=torch.long)
@@ -775,6 +791,19 @@ class MP100CAPE(torch.utils.data.Dataset):
                 if visibility[kpt_idx] > 0:
                     visibility_mask[token_idx] = True
                 token_idx += 1
+        
+        # ========================================================================
+        # CRITICAL FIX: Include EOS token in visibility mask
+        # ========================================================================
+        # BUG: Previously EOS was excluded from loss (line 737 comment)
+        # IMPACT: Model never learned to predict EOS → always generates 200 tokens
+        # FIX: Mark EOS token as True so model receives gradient signal to learn
+        #      when to stop generation
+        # ========================================================================
+        for i, label in enumerate(token_labels):
+            if label == TokenType.eos.value:
+                visibility_mask[i] = True
+                break  # Only mark first EOS
 
         # Pad sequences
         target_seq = self.tokenizer._padding(target_seq, [0, 0], dtype=torch.float32)

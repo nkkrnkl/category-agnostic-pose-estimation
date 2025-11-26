@@ -64,6 +64,14 @@ def get_args_parser():
     parser.add_argument('--category_split_file', default='category_splits.json',
                         help='Path to category split JSON file')
     
+    # Geometric encoder options (CapeX-inspired refactoring)
+    parser.add_argument('--use_geometric_encoder', action='store_true', default=False,
+                        help='Use GeometricSupportEncoder (CapeX-inspired) instead of old SupportPoseGraphEncoder')
+    parser.add_argument('--use_gcn_preenc', action='store_true', default=False,
+                        help='Use GCN pre-encoding in geometric support encoder (requires --use_geometric_encoder)')
+    parser.add_argument('--num_gcn_layers', default=2, type=int,
+                        help='Number of GCN layers if use_gcn_preenc=True')
+    
     # Debug / Overfitting mode (for testing model can learn)
     parser.add_argument('--debug_overfit_category', default=None, type=int,
                         help='DEBUG: Train on single category ID for overfitting test (ignores category_split_file)')
@@ -150,6 +158,8 @@ def get_args_parser():
                         help='Set to 0 for CAPE (no category classification)')
     parser.add_argument('--raster_loss_coef', default=0.0, type=float,
                         help='Rasterization loss coefficient (not used for CAPE)')
+    parser.add_argument('--eos_weight', default=20.0, type=float,
+                        help='Class weight for EOS token to combat class imbalance (default: 20.0)')
     parser.add_argument('--label_smoothing', default=0.0, type=float)
 
     # Dataset parameters
@@ -259,10 +269,36 @@ def setup_cuda_optimizations(args, device):
 
 
 def main(args):
+    """
+    CAPE Training Strategy (Geometry-Only):
+
+    TRAINING PHASE:
+    - Episodic sampling: 1 support image + K query images per episode
+    - Support and query from SAME category, DIFFERENT images
+    - Support provides: coordinates + skeleton (geometric context)
+    - Query learns: autoregressive sequence generation
+    - Causal masking: prevents future token peeking
+    - Teacher forcing: uses GT sequences for training
+
+    VALIDATION PHASE:
+    - Support and query from SAME UNSEEN categories (validation set)
+    - Tests generalization to novel object categories
+    - Measures PCK on unseen category structure
+
+    INFERENCE (TEST) PHASE:
+    - Support and query from UNSEEN categories (test set)
+    - True category-agnostic generalization test
+    - Support from one example, query on novel instances
+    """
     print("=" * 80)
     print("Category-Agnostic Pose Estimation (CAPE) - Episodic Training")
     print("=" * 80)
     print(f"\nMode: Episodic meta-learning with support pose graphs")
+    print(f"Support encoder: {'Geometric (CapeX-inspired)' if args.use_geometric_encoder else 'Original'}")
+    if args.use_geometric_encoder:
+        print(f"  - GCN pre-encoding: {'Enabled' if args.use_gcn_preenc else 'Disabled'}")
+        if args.use_gcn_preenc:
+            print(f"  - GCN layers: {args.num_gcn_layers}")
     print(f"Support encoder layers: {args.support_encoder_layers}")
     print(f"Fusion method: {args.support_fusion_method}")
     print(f"Queries per episode: {args.num_queries_per_episode}")
@@ -336,7 +372,11 @@ def main(args):
     
     # Verify model is on correct device
     model_device = next(model.parameters()).device
-    if model_device != device:
+    # Compare device types (mps == mps:0, cuda == cuda:0, etc.)
+    device_type_matches = (
+        str(model_device).split(':')[0] == str(device).split(':')[0]
+    )
+    if not device_type_matches:
         print(f"⚠️  Warning: Model device ({model_device}) doesn't match expected device ({device})")
     else:
         print(f"✓ Model moved to device: {model_device}")
@@ -972,24 +1012,62 @@ def main(args):
             device=device
         )
 
-        # Print epoch summary
+        # ========================================================================
+        # Epoch Summary with Comparable Metrics
+        # ========================================================================
+        # Training uses auxiliary losses (deep supervision on all 6 decoder layers)
+        # Validation uses only final layer (forward_inference doesn't return aux)
+        # 
+        # We show BOTH:
+        #   - Total train loss (all layers) - actual optimization objective
+        #   - Final layer train loss - comparable to validation for overfitting detection
+        # ========================================================================
+        
+        # Extract final layer losses (without _0, _1, etc. suffixes)
+        train_loss_ce_final = train_stats.get('loss_ce', 0.0)
+        train_loss_coords_final = train_stats.get('loss_coords', 0.0)
+        train_loss_total = train_stats.get('loss', 0.0)
+        
+        # Compute final layer loss (unweighted sum for comparison)
+        # Note: This is the raw sum before weight_dict scaling
+        train_loss_final_layer = train_loss_ce_final + train_loss_coords_final
+        
+        # Validation losses
+        val_loss = val_stats.get('loss', 0.0)
+        val_loss_ce = val_stats.get('loss_ce', 0.0)
+        val_loss_coords = val_stats.get('loss_coords', 0.0)
+        val_pck = val_stats.get('pck', 0.0)
+        val_pck_mean = val_stats.get('pck_mean_categories', 0.0)
+        
         print(f"\n{'=' * 80}")
         print(f"Epoch {epoch + 1} Summary:")
         print(f"{'=' * 80}")
-        print(f"  Train Loss:       {train_stats.get('loss', 0):.4f}")
-        print(f"    - Class Loss:   {train_stats.get('loss_ce', 0):.4f}")
-        print(f"    - Coords Loss:  {train_stats.get('loss_coords', 0):.4f}")
+        print(f"  Train Loss (all layers):    {train_loss_total:.4f}")
+        print(f"  Train Loss (final layer):   {train_loss_final_layer:.4f}")
+        print(f"    - Class Loss:             {train_loss_ce_final:.4f}")
+        print(f"    - Coords Loss:            {train_loss_coords_final:.4f}")
+        print(f"")
+        print(f"  Val Loss (final layer):     {val_loss:.4f}")
+        print(f"    - Class Loss:             {val_loss_ce:.4f}")
+        print(f"    - Coords Loss:            {val_loss_coords:.4f}")
+        print(f"")
+        print(f"  Val PCK@0.2:                {val_pck:.2%}")
+        print(f"    - Mean PCK (categories):  {val_pck_mean:.2%}")
+        print(f"")
         
-        # Validation uses autoregressive inference (no loss, only PCK)
-        val_pck = val_stats.get('pck', 0.0)
-        val_pck_mean = val_stats.get('pck_mean_categories', 0.0)
-        if single_image_mode:
-            print(f"  Val PCK@0.2:      {val_pck:.2%} (same image, autoregressive)")
-        else:
-            print(f"  Val PCK@0.2:      {val_pck:.2%} (unseen categories, autoregressive)")
-        print(f"    - Mean PCK:     {val_pck_mean:.2%} (across categories)")
+        # Overfitting detection (compare final layers only - apples to apples)
+        if val_loss > 0 and train_loss_final_layer > 0:
+            loss_ratio = val_loss / train_loss_final_layer
+            if loss_ratio > 1.5:
+                print(f"  🛑 OVERFITTING ALERT:  Val/Train = {loss_ratio:.2f}x (val >> train)")
+            elif loss_ratio > 1.2:
+                print(f"  ⚠️  Overfitting watch:  Val/Train = {loss_ratio:.2f}x (val > train)")
+            elif loss_ratio > 0.8:
+                print(f"  ✅ Generalization OK:  Val/Train = {loss_ratio:.2f}x (balanced)")
+            else:
+                print(f"  ℹ️  Val < Train:        Val/Train = {loss_ratio:.2f}x (early training)")
         
-        print(f"  Learning Rate:    {optimizer.param_groups[0]['lr']:.6f}")
+        print(f"  Learning Rate:              {optimizer.param_groups[0]['lr']:.6f}")
         print(f"{'=' * 80}\n")
 
         # ========================================================================

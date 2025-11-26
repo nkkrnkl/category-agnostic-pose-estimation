@@ -272,6 +272,10 @@ def run_evaluation(model: nn.Module, dataloader: DataLoader, device: torch.devic
     print("RUNNING EVALUATION")
     print("=" * 80)
     print()
+    print("ℹ️  Note: The model uses autoregressive inference and generates variable-length")
+    print("   sequences based on category keypoint count. Sequences are padded internally")
+    print("   for batch processing. This is expected and correct behavior.")
+    print()
     
     model.eval()
     pck_evaluator = PCKEvaluator(threshold=pck_threshold)
@@ -331,46 +335,46 @@ def run_evaluation(model: nn.Module, dataloader: DataLoader, device: torch.devic
             mask = query_targets['mask']
             
             # ====================================================================
-            # Handle shape mismatch for old checkpoints
+            # Pad autoregressive predictions to GT sequence length if needed
             # ====================================================================
-            # Old checkpoints (trained without tokenizer) only generate 1 keypoint
-            # because they predict <eos> immediately. We need to pad predictions
-            # to match the expected sequence length.
+            # During autoregressive inference, the model generates variable-length
+            # sequences (e.g., 10-40 tokens depending on category) and stops when
+            # it predicts EOS. The GT sequences are padded to a fixed length (200).
+            # We need to pad predictions to match GT length for loss computation.
             # ====================================================================
             if pred_coords.dim() == 3 and pred_coords.shape[1] < gt_coords.shape[1]:
-                if batch_idx == 0:
-                    print(f"\n" + "!" * 80)
-                    print(f"⚠️  CRITICAL WARNING: OLD CHECKPOINT DETECTED")
-                    print(f"!" * 80)
-                    print(f"   pred_coords shape: {pred_coords.shape}")
-                    print(f"   gt_coords shape: {gt_coords.shape}")
-                    print()
-                    print(f"This checkpoint was trained WITHOUT a tokenizer and only generates")
-                    print(f"{pred_coords.shape[1]} keypoint(s) before predicting <eos>.")
-                    print()
-                    print(f"This means:")
-                    print(f"  - The model cannot perform proper autoregressive inference")
-                    print(f"  - Evaluation metrics will not be meaningful")
-                    print(f"  - Visualizations will show incomplete predictions")
-                    print()
-                    print(f"Recommendation: Use a checkpoint from the FIXED training code")
-                    print(f"                (see QUICK_START_AFTER_FIX.md)")
-                    print()
-                    print(f"Continuing with padded predictions for demonstration purposes...")
-                    print(f"!" * 80)
-                    print()
-                
                 # Pad predictions to match GT length
                 seq_len = gt_coords.shape[1]
                 batch_size = pred_coords.shape[0]
                 
-                # Create padded tensor
+                # Create padded tensors
                 padded_pred_coords = torch.zeros(batch_size, seq_len, 2, device=pred_coords.device)
                 padded_pred_coords[:, :pred_coords.shape[1], :] = pred_coords
                 pred_coords = padded_pred_coords
+                
+                # Also pad pred_logits if available
+                pred_logits = predictions.get('logits', None)
+                if pred_logits is not None and pred_logits.shape[1] < seq_len:
+                    vocab_size = pred_logits.shape[2]
+                    padded_pred_logits = torch.zeros(batch_size, seq_len, vocab_size, device=pred_logits.device)
+                    padded_pred_logits[:, :pred_logits.shape[1], :] = pred_logits
+                    predictions['logits'] = padded_pred_logits
             
             # Extract keypoints from sequences
             try:
+                # ================================================================
+                # DEBUG: Print shapes before extraction (controlled by DEBUG_EVAL env var)
+                # ================================================================
+                if batch_idx == 0 and os.environ.get('DEBUG_EVAL', '0') == '1':
+                    print(f"\n[DEBUG] Before extraction:")
+                    print(f"  gt_coords shape: {gt_coords.shape}")
+                    print(f"  token_labels shape: {token_labels.shape}")
+                    print(f"  mask shape: {mask.shape}")
+                    print(f"  mask dtype: {mask.dtype}")
+                    print(f"  mask[0] shape: {mask[0].shape}")
+                    print(f"  mask[0] sum (# True values): {mask[0].sum().item()}")
+                    print(f"  pred_coords shape: {pred_coords.shape}")
+                
                 # ================================================================
                 # CRITICAL FIX: Extract GT using GT structure, predictions using PREDICTED structure
                 # ================================================================
@@ -451,6 +455,33 @@ def run_evaluation(model: nn.Module, dataloader: DataLoader, device: torch.devic
                     
                     vis = meta.get('visibility', [])
                     num_kpts_for_category = len(vis)
+                    
+                    # Debug logging for keypoint count diagnostic
+                    if os.environ.get('DEBUG_KEYPOINT_COUNT', '0') == '1' and idx == 0 and batch_idx == 0:
+                        print(f"[DIAG eval_cape] Trimmed keypoints:")
+                        print(f"  pred before: {pred_kpts[idx].shape}")
+                        print(f"  gt before: {gt_kpts[idx].shape}")
+                        print(f"  num_kpts_for_category: {num_kpts_for_category}")
+                        print(f"  Will trim to: [{num_kpts_for_category}, 2]")
+                    
+                    # ================================================================
+                    # CRITICAL ASSERTION: Detect keypoint count mismatch before trimming
+                    # ================================================================
+                    # If predictions significantly exceed expected count, the model
+                    # likely didn't learn to predict EOS properly.
+                    # ================================================================
+                    pred_count = pred_kpts[idx].shape[0]
+                    expected_count = num_kpts_for_category
+                    excess = pred_count - expected_count
+                    
+                    if excess > 10 and batch_idx == 0:  # Only warn once
+                        import warnings
+                        warnings.warn(
+                            f"⚠️  Model generated {pred_count} keypoints but expected ~{expected_count}. "
+                            f"Excess: {excess} keypoints. This suggests the model didn't learn to "
+                            f"predict EOS properly. The model may need retraining with EOS token "
+                            f"included in the classification loss."
+                        )
                     
                     # Trim to actual number of keypoints for this category
                     pred_kpts_trimmed.append(pred_kpts[idx, :num_kpts_for_category, :])
