@@ -74,6 +74,8 @@ def get_args_parser():
     # Evaluation arguments
     parser.add_argument('--num-episodes', default=None, type=int,
                        help='Number of episodes to evaluate (None = all)')
+    parser.add_argument('--eval_seed', default=123, type=int,
+                       help='Random seed for reproducible evaluation (default: 123)')
     parser.add_argument('--num-queries-per-episode', default=None, type=int,
                        help='Queries per episode (None = use checkpoint default)')
     parser.add_argument('--pck-threshold', default=0.2, type=float,
@@ -194,7 +196,8 @@ def load_checkpoint_and_model(checkpoint_path: str, device: torch.device) -> Tup
 
 
 def build_dataloader(args: argparse.Namespace, split: str, num_workers: int,
-                     num_episodes: int = None, num_queries: int = None) -> DataLoader:
+                     num_episodes: int = None, num_queries: int = None,
+                     eval_seed: int = 123) -> DataLoader:
     """
     Build episodic dataloader for evaluation.
     
@@ -204,6 +207,7 @@ def build_dataloader(args: argparse.Namespace, split: str, num_workers: int,
         num_workers: Number of dataloader workers
         num_episodes: Number of episodes per epoch (None = use default)
         num_queries: Number of queries per episode (None = use default from args)
+        eval_seed: Random seed for reproducible evaluation (default: 123)
         
     Returns:
         dataloader: Episodic dataloader
@@ -241,7 +245,8 @@ def build_dataloader(args: argparse.Namespace, split: str, num_workers: int,
         num_queries_per_episode=num_queries,
         episodes_per_epoch=num_episodes,
         num_workers=num_workers,
-        seed=42  # Deterministic for visualization
+        seed=eval_seed,  # Deterministic evaluation with configurable seed
+        fixed_episodes=True  # Use fixed episodes for reproducible evaluation
     )
     
     print(f"✓ Episodic dataloader:")
@@ -943,6 +948,19 @@ def main():
     parser = get_args_parser()
     args = parser.parse_args()
     
+    # ========================================================================
+    # Set random seeds for reproducible evaluation
+    # ========================================================================
+    import random
+    import numpy as np
+    random.seed(args.eval_seed)
+    np.random.seed(args.eval_seed)
+    torch.manual_seed(args.eval_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.eval_seed)
+    # Note: Episodic sampler also uses this seed internally
+    # ========================================================================
+    
     # Create output directory
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -957,6 +975,7 @@ def main():
     print(f"Checkpoint: {args.checkpoint}")
     print(f"Split: {args.split}")
     print(f"Output: {args.output_dir}")
+    print(f"Eval Seed: {args.eval_seed} (for reproducibility)")
     print()
     
     # Determine device
@@ -986,7 +1005,8 @@ def main():
         args.split,
         args.num_workers,
         num_episodes=args.num_episodes,
-        num_queries=args.num_queries_per_episode
+        num_queries=args.num_queries_per_episode,
+        eval_seed=args.eval_seed
     )
     
     # Run evaluation

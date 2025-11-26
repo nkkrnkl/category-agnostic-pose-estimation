@@ -138,7 +138,8 @@ class EpisodicDataset(data.Dataset):
     """
 
     def __init__(self, base_dataset, category_split_file, split='train',
-                 num_queries_per_episode=2, episodes_per_epoch=1000, seed=None):
+                 num_queries_per_episode=2, episodes_per_epoch=1000, seed=None,
+                 fixed_episodes=False):
         """
         Args:
             base_dataset: MP100CAPE dataset instance
@@ -147,9 +148,12 @@ class EpisodicDataset(data.Dataset):
             num_queries_per_episode: Number of query images per episode
             episodes_per_epoch: Number of episodes per training epoch
             seed: Random seed
+            fixed_episodes: If True, pre-generate episodes once and reuse (for stable val)
         """
         self.base_dataset = base_dataset
         self.episodes_per_epoch = episodes_per_epoch
+        self.fixed_episodes = fixed_episodes
+        self._cached_episodes = None  # Will store pre-generated episodes if fixed_episodes=True
 
         # Create episodic sampler
         self.sampler = EpisodicSampler(
@@ -160,8 +164,18 @@ class EpisodicDataset(data.Dataset):
             seed=seed
         )
 
-        print(f"EpisodicDataset: {episodes_per_epoch} episodes/epoch, "
-              f"{num_queries_per_episode} queries/episode")
+        # Pre-generate episodes if using fixed mode
+        if self.fixed_episodes:
+            print(f"EpisodicDataset: Pre-generating {episodes_per_epoch} fixed episodes "
+                  f"for {split} split (stable curves)...")
+            self._cached_episodes = []
+            for _ in range(episodes_per_epoch):
+                episode = self.sampler.sample_episode()
+                self._cached_episodes.append(episode)
+            print(f"✓ Cached {len(self._cached_episodes)} episodes")
+        else:
+            print(f"EpisodicDataset: {episodes_per_epoch} episodes/epoch, "
+                  f"{num_queries_per_episode} queries/episode (random sampling)")
 
     def __len__(self):
         return self.episodes_per_epoch
@@ -186,8 +200,11 @@ class EpisodicDataset(data.Dataset):
         
         while retry_count < max_retries:
             try:
-                # Sample episode
-                episode = self.sampler.sample_episode()
+                # Sample episode (use cached if fixed_episodes=True, otherwise random)
+                if self.fixed_episodes and self._cached_episodes is not None:
+                    episode = self._cached_episodes[idx % len(self._cached_episodes)]
+                else:
+                    episode = self.sampler.sample_episode()
 
                 # Load support image
                 support_data = self.base_dataset[episode['support_idx']]
@@ -506,7 +523,8 @@ def episodic_collate_fn(batch):
 
 def build_episodic_dataloader(base_dataset, category_split_file, split='train',
                               batch_size=2, num_queries_per_episode=2,
-                              episodes_per_epoch=1000, num_workers=2, seed=None):
+                              episodes_per_epoch=1000, num_workers=2, seed=None,
+                              fixed_episodes=False):
     """
     Build episodic dataloader for CAPE training/validation/testing.
 
@@ -519,6 +537,7 @@ def build_episodic_dataloader(base_dataset, category_split_file, split='train',
         episodes_per_epoch: Total episodes per epoch
         num_workers: Number of worker processes
         seed: Random seed
+        fixed_episodes: If True, pre-generate episodes once and reuse (for stable val curves)
 
     Returns:
         dataloader: DataLoader with episodic sampling
@@ -530,7 +549,8 @@ def build_episodic_dataloader(base_dataset, category_split_file, split='train',
         split=split,
         num_queries_per_episode=num_queries_per_episode,
         episodes_per_epoch=episodes_per_epoch,
-        seed=seed
+        seed=seed,
+        fixed_episodes=fixed_episodes
     )
 
     # Create dataloader

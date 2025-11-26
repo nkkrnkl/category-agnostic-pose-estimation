@@ -1,0 +1,96 @@
+/Users/pavlosrousoglou/Desktop/Cornell/Deep Learning/category-agnostic-pose-estimation/datasets/mp100_cape.py:899: UserWarning: Argument(s) 'var_limit, mean' are not valid for transform GaussNoise
+  A.GaussNoise(
+================================================================================
+Category-Agnostic Pose Estimation (CAPE) - Episodic Training
+================================================================================
+
+Mode: Episodic meta-learning with support pose graphs
+Support encoder: Geometric (CapeX-inspired)
+  - GCN pre-encoding: Enabled
+  - GCN layers: 2
+Support encoder layers: 3
+Fusion method: cross_attention
+Queries per episode: 2
+Train episodes per epoch: 500
+Val episodes per epoch: 200
+Fixed validation episodes: YES (seed=42) - stable curves
+
+Note: Using MPS (Apple Silicon GPU)
+      MPS fallback enabled for unsupported ops (e.g., grid_sampler)
+Using device: mps
+
+loading annotations into memory...
+Done (t=0.13s)
+creating index...
+index created!
+📊 Multi-instance statistics:
+   - Images with multiple instances: 615/12816 (4.8%)
+   - Total instances available: 13712
+   - Instances actually used: 12816 (93.5%)
+   - Instances skipped: 896 (6.5%)
+   - Max instances in single image: 9
+   ⚠️  Note: Currently using only first instance per image
+Loaded MP-100 train dataset: 12816 images
+loading annotations into memory...
+Done (t=0.01s)
+creating index...
+index created!
+📊 Multi-instance statistics:
+   - Images with multiple instances: 62/1703 (3.6%)
+   - Total instances available: 1795
+   - Instances actually used: 1703 (94.9%)
+   - Instances skipped: 92 (5.1%)
+   - Max instances in single image: 8
+   ⚠️  Note: Currently using only first instance per image
+Loaded MP-100 val dataset: 1703 images
+Tokenizer: <datasets.discrete_tokenizer.DiscreteTokenizerV2 object at 0x135314830>
+  vocab_size: 1940
+  num_bins: 44
+
+Building base Raster2Seq model...
+Initializing CAPE Support Pose Encoder...
+Building CAPE-specific loss criterion...
+✓ CAPE criterion: EOS token weight = 20.0× (to combat class imbalance)
+✓ CAPE criterion created with visibility masking support
+Wrapping with CAPE support conditioning...
+✓ Model moved to device: mps:0
+Total trainable parameters: 50,500,852
+Creating episodic dataloaders...
+Episodic sampler for train split: 69 categories
+Valid categories (>=3 examples): 69
+Samples per category: min=130, max=217
+EpisodicDataset: 500 episodes/epoch, 2 queries/episode (random sampling)
+Episodic sampler for val split: 10 categories
+Valid categories (>=3 examples): 10
+Samples per category: min=27, max=232
+EpisodicDataset: Pre-generating 200 fixed episodes for val split (stable curves)...
+✓ Cached 200 episodes
+Train episodes/epoch: 500
+Val episodes/epoch: 400
+
+Gradient Accumulation:
+  - Physical batch size: 2 episodes
+  - Accumulation steps: 4
+  - Effective batch size: 8 episodes
+  - Memory usage: Same as 2 episodes (no extra memory!)
+
+================================================================================
+Starting Training
+================================================================================
+
+
+Epoch 1/300
+--------------------------------------------------------------------------------
+Epoch 0:   0%|          | 0/250 [00:00<?, ?it/s]/Users/pavlosrousoglou/Desktop/Cornell/Deep Learning/category-agnostic-pose-estimation/venv/lib/python3.13/site-packages/torch/utils/data/dataloader.py:692: UserWarning: 'pin_memory' argument is set as true but not supported on MPS now, device pinned memory won't be used.
+  warnings.warn(warn_msg)
+/Users/pavlosrousoglou/Desktop/Cornell/Deep Learning/category-agnostic-pose-estimation/venv/lib/python3.13/site-packages/albumentations/augmentations/blur/functional.py:416: RuntimeWarning: divide by zero encountered in divide
+  kernel_1d = np.exp(-0.5 * (x / sigma) ** 2)
+/Users/pavlosrousoglou/Desktop/Cornell/Deep Learning/category-agnostic-pose-estimation/venv/lib/python3.13/site-packages/albumentations/augmentations/blur/functional.py:416: RuntimeWarning: invalid value encountered in divide
+  kernel_1d = np.exp(-0.5 * (x / sigma) ** 2)
+/Users/pavlosrousoglou/Desktop/Cornell/Deep Learning/category-agnostic-pose-estimation/venv/lib/python3.13/site-packages/albumentations/augmentations/blur/functional.py:416: RuntimeWarning: divide by zero encountered in divide
+  kernel_1d = np.exp(-0.5 * (x / sigma) ** 2)
+/Users/pavlosrousoglou/Desktop/Cornell/Deep Learning/category-agnostic-pose-estimation/venv/lib/python3.13/site-packages/albumentations/augmentations/blur/functional.py:416: RuntimeWarning: invalid value encountered in divide
+  kernel_1d = np.exp(-0.5 * (x / sigma) ** 2)
+Epoch 0:   0%|          | 0/250 [00:10<?, ?it/s]/Users/pavlosrousoglou/Desktop/Cornell/Deep Learning/category-agnostic-pose-estimation/venv/lib/python3.13/site-packages/torch/autograd/graph.py:841: UserWarning: The operator 'aten::grid_sampler_2d_backward' is not currently supported on the MPS backend and will fall back to run on the CPU. This may have performance implications. (Triggered internally at /Users/runner/work/pytorch/pytorch/pytorch/aten/src/ATen/mps/MPSFallback.mm:15.)
+  return Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+Epoch 0:   0%|          | 0/250 [00:13<?, ?it/s, loss=16.2934, loss_ce=1.0396, loss_coords=1.4776, lr=0.000050]Epoch 0:   0%|          | 1/250 [00:13<55:19, 13.33s/it, loss=16.2934, loss_ce=1.0396, loss_coords=1.4776, lr=0.000050]Epoch 0:   0%|          | 1/250 [00:17<55:19, 13.33s/it, loss=15.2274, loss_ce=1.0780, loss_coords=1.3465, lr=0.000050]Epoch 0:   1%|          | 2/250 [00:17<33:30,  8.11s/it, loss=15.2274, loss_ce=1.0780, loss_coords=1.3465, lr=0.000050]

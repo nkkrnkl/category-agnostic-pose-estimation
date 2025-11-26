@@ -61,6 +61,12 @@ def get_args_parser():
                         help='Number of query images per episode')
     parser.add_argument('--episodes_per_epoch', default=1000, type=int,
                         help='Number of episodes per training epoch')
+    parser.add_argument('--val_episodes_per_epoch', default=200, type=int,
+                        help='Number of episodes per validation epoch (for stable metrics)')
+    parser.add_argument('--fixed_val_episodes', action='store_true',
+                        help='Use fixed validation episodes each epoch for stable curves')
+    parser.add_argument('--val_seed', default=42, type=int,
+                        help='Seed for validation episode sampling (used with --fixed_val_episodes)')
     parser.add_argument('--category_split_file', default='category_splits.json',
                         help='Path to category split JSON file')
     
@@ -237,7 +243,13 @@ def main(args):
     print(f"Support encoder layers: {args.support_encoder_layers}")
     print(f"Fusion method: {args.support_fusion_method}")
     print(f"Queries per episode: {args.num_queries_per_episode}")
-    print(f"Episodes per epoch: {args.episodes_per_epoch}\n")
+    print(f"Train episodes per epoch: {args.episodes_per_epoch}")
+    print(f"Val episodes per epoch: {args.val_episodes_per_epoch}")
+    if args.fixed_val_episodes:
+        print(f"Fixed validation episodes: YES (seed={args.val_seed}) - stable curves")
+    else:
+        print(f"Fixed validation episodes: NO - random episodes each epoch")
+    print()
 
     # Auto-detect device (prioritizes CUDA if available)
     if args.device is None:
@@ -403,7 +415,14 @@ def main(args):
     #   Training = seen categories, Validation = unseen categories, Test = held-out unseen
     # ========================================================================
     
-    val_episodes = max(1, args.episodes_per_epoch // 10)  # At least 1 episode
+    # ========================================================================
+    # Validation Dataloader Configuration
+    # ========================================================================
+    # Use dedicated val_episodes_per_epoch for stable metrics
+    # If fixed_val_episodes=True, the same episodes will be reused each epoch
+    # ========================================================================
+    val_seed = args.val_seed if args.fixed_val_episodes else (args.seed + 999)
+    
     val_loader = build_episodic_dataloader(
         base_dataset=val_dataset,  # Use validation images with validation categories
         category_split_file=str(category_split_file),
@@ -413,9 +432,10 @@ def main(args):
                        # Model outputs fixed-length sequence based on max keypoints seen
                        # To avoid shape mismatches during PCK evaluation, keep batch_size=1 for validation
         num_queries_per_episode=args.num_queries_per_episode,
-        episodes_per_epoch=val_episodes,
+        episodes_per_epoch=args.val_episodes_per_epoch,
         num_workers=args.num_workers,
-        seed=args.seed + 999  # Different seed for diversity
+        seed=val_seed,
+        fixed_episodes=args.fixed_val_episodes  # New: cache episodes for stable curves
     )
 
     print(f"Train episodes/epoch: {len(train_loader) * args.batch_size}")
@@ -528,6 +548,14 @@ def main(args):
     # restoration from checkpoint.
     # ========================================================================
     early_stop_triggered = False
+    
+    # ========================================================================
+    # Track recent validation metrics for moving average (reduce noise)
+    # ========================================================================
+    recent_val_losses = []  # Last N epochs of val loss
+    recent_val_pcks = []    # Last N epochs of val PCK
+    moving_avg_window = 5   # 5-epoch moving average
+    # ========================================================================
 
     for epoch in range(args.start_epoch, args.epochs):
         print(f"\nEpoch {epoch + 1}/{args.epochs}")
@@ -583,6 +611,22 @@ def main(args):
         val_pck = val_stats.get('pck', 0.0)
         val_pck_mean = val_stats.get('pck_mean_categories', 0.0)
         
+        # ========================================================================
+        # Update moving average tracking
+        # ========================================================================
+        recent_val_losses.append(val_loss)
+        recent_val_pcks.append(val_pck)
+        
+        # Keep only last N epochs
+        if len(recent_val_losses) > moving_avg_window:
+            recent_val_losses.pop(0)
+            recent_val_pcks.pop(0)
+        
+        # Compute moving averages
+        val_loss_ma = sum(recent_val_losses) / len(recent_val_losses)
+        val_pck_ma = sum(recent_val_pcks) / len(recent_val_pcks)
+        # ========================================================================
+        
         print(f"\n{'=' * 80}")
         print(f"Epoch {epoch + 1} Summary:")
         print(f"{'=' * 80}")
@@ -591,12 +635,25 @@ def main(args):
         print(f"    - Class Loss:             {train_loss_ce_final:.4f}")
         print(f"    - Coords Loss:            {train_loss_coords_final:.4f}")
         print(f"")
+        print(f"  Val episodes: {args.val_episodes_per_epoch} "
+              f"(x{args.num_queries_per_episode} queries = "
+              f"{args.val_episodes_per_epoch * args.num_queries_per_episode} samples)")
         print(f"  Val Loss (final layer):     {val_loss:.4f}")
         print(f"    - Class Loss:             {val_loss_ce:.4f}")
         print(f"    - Coords Loss:            {val_loss_coords:.4f}")
+        
+        # Display moving average if we have enough epochs
+        if len(recent_val_losses) >= 2:
+            print(f"  Val Loss ({len(recent_val_losses)}-epoch MA):      {val_loss_ma:.4f}")
+        
         print(f"")
         print(f"  Val PCK@0.2:                {val_pck:.2%}")
         print(f"    - Mean PCK (categories):  {val_pck_mean:.2%}")
+        
+        # Display moving average if we have enough epochs
+        if len(recent_val_pcks) >= 2:
+            print(f"  Val PCK@0.2 ({len(recent_val_pcks)}-epoch MA):     {val_pck_ma:.2%}")
+        
         print(f"")
         
         # Overfitting detection (compare final layers only - apples to apples)
