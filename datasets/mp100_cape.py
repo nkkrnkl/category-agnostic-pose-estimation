@@ -606,6 +606,27 @@ class MP100CAPE(torch.utils.data.Dataset):
         record["height"] = new_h
         record["width"] = new_w
 
+        # ========================================================================
+        # CRITICAL FIX: Update bbox_width/height to match resized dimensions
+        # ========================================================================
+        # Previously, bbox_width and bbox_height were set to original bbox size
+        # (before resize) in __getitem__. After resize, these values were NOT updated,
+        # causing PCK calculation to use wrong dimensions for threshold.
+        #
+        # Problem:
+        #   - Original bbox: 200×300 → bbox_width=200, bbox_height=300
+        #   - Image resized to: 512×512
+        #   - Keypoints normalized by: 512 (correct)
+        #   - PCK uses: bbox_width=200, bbox_height=300 (WRONG!)
+        #   - Threshold = 0.2 × sqrt(200²+300²) = 72 pixels (too lenient!)
+        #
+        # Solution:
+        #   - Update bbox_width/height to match resized dimensions (512×512)
+        #   - This ensures PCK threshold uses correct dimensions
+        # ========================================================================
+        record["bbox_width"] = new_w  # Should be 512, not original bbox width
+        record["bbox_height"] = new_h  # Should be 512, not original bbox height
+
         # ================================================================
         # NOTE: Keypoints are already scaled by Albumentations!
         # ================================================================

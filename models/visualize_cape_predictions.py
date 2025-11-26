@@ -483,8 +483,12 @@ def visualize_from_checkpoint(args):
                             pck_score = None
                             if query_gt_coords and len(pred_keypoints) > 0:
                                 from util.eval_utils import compute_pck_bbox
-                                bbox_w = img_info['width']
-                                bbox_h = img_info['height']
+                                # NOTE: This is a direct file load path (bypasses dataset).
+                                # For consistency, use 512×512 (standard resize) if image was resized.
+                                # Otherwise, use original image dimensions from COCO annotations.
+                                # In practice, model expects 512×512, so use that for PCK threshold.
+                                bbox_w = 512.0  # Standard resize dimension
+                                bbox_h = 512.0  # Standard resize dimension
                                 num_kpts = min(len(pred_keypoints), len(query_gt_coords))
                                 pred_kpts_trimmed = pred_keypoints[:num_kpts]
                                 gt_kpts_trimmed = query_gt_coords[:num_kpts]
@@ -579,8 +583,11 @@ def visualize_from_checkpoint(args):
             pck_score = None
             if query_gt_coords and len(pred_keypoints) > 0:
                 from util.eval_utils import compute_pck_bbox
-                bbox_w = query_data.get('bbox_width', 512.0)
-                bbox_h = query_data.get('bbox_height', 512.0)
+                # Use resized image dimensions (width/height) for PCK threshold
+                # These are guaranteed to be 512×512 after resize, matching the
+                # coordinate normalization. bbox_width/height may be original bbox size.
+                bbox_w = query_data.get('width', query_data.get('bbox_width', 512.0))
+                bbox_h = query_data.get('height', query_data.get('bbox_height', 512.0))
                 num_kpts = min(len(pred_keypoints), len(query_gt_coords))
                 pred_kpts_trimmed = pred_keypoints[:num_kpts]
                 gt_kpts_trimmed = query_gt_coords[:num_kpts]
@@ -788,8 +795,11 @@ def visualize_from_checkpoint(args):
                 from util.eval_utils import compute_pck_bbox
                 
                 # Get bbox dimensions for normalization
-                bbox_w = data.get('bbox_width', 512.0)
-                bbox_h = data.get('bbox_height', 512.0)
+                # Use resized image dimensions (width/height) for PCK threshold
+                # These are guaranteed to be 512×512 after resize, matching the
+                # coordinate normalization. bbox_width/height may be original bbox size.
+                bbox_w = data.get('width', data.get('bbox_width', 512.0))
+                bbox_h = data.get('height', data.get('bbox_height', 512.0))
                 
                 # Trim to actual number of keypoints for this category
                 num_kpts = min(len(pred_keypoints), len(query_gt_coords))
