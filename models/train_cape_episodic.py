@@ -91,6 +91,11 @@ def get_args_parser():
     parser.add_argument('--lr_drop', default='200,250', type=str)
     parser.add_argument('--early_stopping_patience', default=20, type=int,
                         help='Stop training if PCK does not improve for N epochs (0 to disable)')
+    parser.add_argument('--stop_when_loss_zero', action='store_true',
+                        help='For single-image mode: Stop training when all losses reach near-zero (perfect overfitting). '
+                             'Overrides early stopping. Requires --debug_single_image or --debug_single_image_path.')
+    parser.add_argument('--loss_zero_threshold', default=1e-5, type=float,
+                        help='Threshold for considering loss as "zero" when using --stop_when_loss_zero (default: 1e-5)')
     parser.add_argument('--clip_max_norm', default=0.1, type=float,
                         help='gradient clipping max norm')
 
@@ -910,9 +915,25 @@ def main(args):
             print(f"⚠️  Checkpoint not found: {args.resume}")
             print(f"   Starting training from scratch...\n")
 
+    # ========================================================================
+    # Validate loss-based stopping configuration
+    # ========================================================================
+    if args.stop_when_loss_zero and not single_image_mode:
+        raise ValueError(
+            "ERROR: --stop_when_loss_zero can only be used with single-image mode.\n"
+            "Please use --debug_single_image or --debug_single_image_path to enable single-image mode."
+        )
+    
     print("\n" + "=" * 80)
     print("Starting Training")
-    print("=" * 80 + "\n")
+    print("=" * 80)
+    if single_image_mode and args.stop_when_loss_zero:
+        print(f"\n🎯 LOSS-BASED STOPPING ENABLED (Perfect Overfitting Mode)")
+        print(f"   Training will stop when all losses reach ≤ {args.loss_zero_threshold:.2e}")
+        print(f"   This will create a model that perfectly memorizes the single image.")
+        print(f"   Early stopping (PCK-based) is DISABLED in this mode.")
+        print()
+    print()
 
     # ========================================================================
     # Early stopping tracking
@@ -1084,7 +1105,10 @@ def main(args):
                 print(f"     (on {val_stats.get('pck_num_visible', 0)} visible keypoints across unseen validation categories)")
             
             # Check early stopping (based on PCK for pose estimation)
-            if args.early_stopping_patience > 0 and epochs_without_improvement >= args.early_stopping_patience:
+            # BUT: Skip if loss-based stopping is enabled for single-image mode
+            if (args.early_stopping_patience > 0 and 
+                epochs_without_improvement >= args.early_stopping_patience and
+                not (single_image_mode and args.stop_when_loss_zero)):
                 print(f"\n{'!' * 80}")
                 print(f"Early stopping triggered!")
                 print(f"No improvement in PCK for {args.early_stopping_patience} epochs.")
@@ -1092,6 +1116,45 @@ def main(args):
                 print(f"{'!' * 80}\n")
                 early_stop_triggered = True
                 break  # Exit training loop
+        
+        # ========================================================================
+        # LOSS-BASED STOPPING: For single-image perfect overfitting
+        # ========================================================================
+        # Stop when all training losses reach near-zero, indicating perfect memorization
+        # This is only enabled in single-image mode with --stop_when_loss_zero flag
+        # ========================================================================
+        if single_image_mode and args.stop_when_loss_zero:
+            train_loss = train_stats.get('loss', float('inf'))
+            loss_ce = train_stats.get('loss_ce', float('inf'))
+            loss_coords = train_stats.get('loss_coords', float('inf'))
+            threshold = args.loss_zero_threshold
+            
+            all_losses_zero = (
+                train_loss <= threshold and
+                loss_ce <= threshold and
+                loss_coords <= threshold
+            )
+            
+            if all_losses_zero:
+                print(f"\n{'🎯' * 40}")
+                print(f"PERFECT OVERFITTING ACHIEVED!")
+                print(f"{'🎯' * 40}")
+                print(f"All training losses have reached near-zero:")
+                print(f"  - Total Loss:    {train_loss:.2e} (threshold: {threshold:.2e})")
+                print(f"  - Class Loss:    {loss_ce:.2e} (threshold: {threshold:.2e})")
+                print(f"  - Coords Loss:   {loss_coords:.2e} (threshold: {threshold:.2e})")
+                print(f"\nThe model has perfectly memorized the single training image!")
+                print(f"Stopping training at epoch {epoch + 1}.")
+                print(f"{'🎯' * 40}\n")
+                early_stop_triggered = True
+                break  # Exit training loop
+            else:
+                # Show progress toward zero loss
+                if epoch % 5 == 0 or train_loss < 0.01:  # Print every 5 epochs or when loss is small
+                    print(f"  📊 Progress toward zero loss:")
+                    print(f"     Total Loss:    {train_loss:.6f} (target: ≤{threshold:.2e})")
+                    print(f"     Class Loss:    {loss_ce:.6f} (target: ≤{threshold:.2e})")
+                    print(f"     Coords Loss:   {loss_coords:.6f} (target: ≤{threshold:.2e})")
 
     # Training complete (either finished all epochs or early stopped)
     print("\n" + "=" * 80)
