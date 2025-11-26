@@ -13,7 +13,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from .support_encoder import SupportPoseGraphEncoder, SupportGraphAggregator
-from .geometric_support_encoder import GeometricSupportEncoder
 
 
 class CAPEModel(nn.Module):
@@ -28,8 +27,7 @@ class CAPEModel(nn.Module):
     """
 
     def __init__(self, base_model, hidden_dim=256, support_encoder_layers=3,
-                 support_fusion_method='cross_attention', use_geometric_encoder=False,
-                 use_gcn_preenc=False, num_gcn_layers=2):
+                 support_fusion_method='cross_attention'):
         """
         Args:
             base_model: RoomFormerV2 model instance
@@ -39,41 +37,21 @@ class CAPEModel(nn.Module):
                 - 'cross_attention': Add cross-attention layer to decoder
                 - 'concat': Concatenate support features
                 - 'add': Add support features to query features
-            use_geometric_encoder: If True, use GeometricSupportEncoder (CapeX-inspired)
-                                  If False, use old SupportPoseGraphEncoder (default: False)
-            use_gcn_preenc: If True and use_geometric_encoder=True, use GCN pre-encoding
-                           in support encoder (default: False)
-            num_gcn_layers: Number of GCN layers if use_gcn_preenc=True (default: 2)
         """
         super().__init__()
 
         self.base_model = base_model
         self.hidden_dim = hidden_dim
         self.support_fusion_method = support_fusion_method
-        self.use_geometric_encoder = use_geometric_encoder
 
-        # Support pose graph encoder (toggle between old and new)
-        if use_geometric_encoder:
-            # NEW: Geometry-only encoder with CapeX-inspired components
-            self.support_encoder = GeometricSupportEncoder(
-                hidden_dim=hidden_dim,
-                num_encoder_layers=support_encoder_layers,
-                nhead=8,
-                dim_feedforward=1024,
-                dropout=0.1,
-                use_gcn_preenc=use_gcn_preenc,
-                num_gcn_layers=num_gcn_layers,
-                activation='relu'
-            )
-        else:
-            # OLD: Original support encoder
-            self.support_encoder = SupportPoseGraphEncoder(
-                hidden_dim=hidden_dim,
-                nheads=8,
-                num_encoder_layers=support_encoder_layers,
-                dim_feedforward=1024,
-                dropout=0.1
-            )
+        # Support pose graph encoder
+        self.support_encoder = SupportPoseGraphEncoder(
+            hidden_dim=hidden_dim,
+            nheads=8,
+            num_encoder_layers=support_encoder_layers,
+            dim_feedforward=1024,
+            dropout=0.1
+        )
 
         # Support graph aggregator (for global pose structure)
         self.support_aggregator = SupportGraphAggregator(
@@ -408,9 +386,6 @@ def build_cape_model(args, base_model):
             - hidden_dim: Hidden dimension (default: 256)
             - support_encoder_layers: Support encoder layers (default: 3)
             - support_fusion_method: Fusion method (default: 'cross_attention')
-            - use_geometric_encoder: Use CapeX-inspired geometric encoder (default: False)
-            - use_gcn_preenc: Use GCN pre-encoding if geometric encoder (default: False)
-            - num_gcn_layers: Number of GCN layers (default: 2)
 
         base_model: Pre-built RoomFormerV2 model
 
@@ -421,10 +396,7 @@ def build_cape_model(args, base_model):
         base_model=base_model,
         hidden_dim=getattr(args, 'hidden_dim', 256),
         support_encoder_layers=getattr(args, 'support_encoder_layers', 3),
-        support_fusion_method=getattr(args, 'support_fusion_method', 'cross_attention'),
-        use_geometric_encoder=getattr(args, 'use_geometric_encoder', False),
-        use_gcn_preenc=getattr(args, 'use_gcn_preenc', False),
-        num_gcn_layers=getattr(args, 'num_gcn_layers', 2)
+        support_fusion_method=getattr(args, 'support_fusion_method', 'cross_attention')
     )
 
 
