@@ -801,27 +801,36 @@ def evaluate_cape(model, criterion, data_loader, device, compute_pck=True, pck_t
                     # ================================================================
                     # CRITICAL FIX: Scale keypoints to PIXEL space for PCK computation
                     # ================================================================
-                    # BUG: Keypoints are in [0,1] normalized space (relative to 512x512 image)
-                    #      but bbox dimensions are in PIXELS (original bbox size before resize)
-                    # This creates a ~100x scaling error in PCK threshold!
-                    # 
-                    # FIX: Scale keypoints to pixel space before PCK:
-                    #   - Keypoints are in [0,1] relative to 512x512 image
-                    #   - Multiply by 512 to get pixel coordinates
-                    #   - Then compute PCK using pixel coords and pixel bbox dims
+                    # Keypoints are in [0,1] normalized space (relative to 512x512 image)
+                    # Scale by 512 to get pixel coordinates in 512x512 space
                     # ================================================================
                     pred_kpts_trimmed_pixels = [kpts * 512.0 for kpts in pred_kpts_trimmed]
                     gt_kpts_trimmed_pixels = [kpts * 512.0 for kpts in gt_kpts_trimmed]
+                    
+                    # ================================================================
+                    # CRITICAL FIX #1: Use 512x512 for bbox dimensions in PCK
+                    # ================================================================
+                    # BUG: Keypoints are scaled to 512x512 pixel space, but bbox_widths/bbox_heights
+                    #      are from original bbox size (e.g., 200×300). This creates a mismatch:
+                    #      - Keypoints in 512×512 space → threshold should be 0.2 × sqrt(512²+512²) = 144.8px
+                    #      - But using 200×300 → threshold = 0.2 × sqrt(200²+300²) = 72.1px (TOO STRICT!)
+                    #
+                    # FIX: Since keypoints are normalized to 512×512, use 512×512 for bbox dimensions
+                    #      This ensures PCK threshold matches the actual coordinate space.
+                    # ================================================================
+                    # Override bbox dimensions to match resized image size (512×512)
+                    bbox_widths_pck = torch.full_like(bbox_widths, 512.0)
+                    bbox_heights_pck = torch.full_like(bbox_heights, 512.0)
                     # ================================================================
                     
-                    # Add to PCK evaluator with actual bbox dimensions and visibility
+                    # Add to PCK evaluator with CORRECTED bbox dimensions (512×512)
                     # Note: pred_kpts_trimmed and gt_kpts_trimmed are LISTS of tensors
                     # with potentially different lengths (per category)
                     pck_evaluator.add_batch(
-                        pred_keypoints=pred_kpts_trimmed_pixels,  # NOW IN PIXELS!
-                        gt_keypoints=gt_kpts_trimmed_pixels,      # NOW IN PIXELS!
-                        bbox_widths=bbox_widths,
-                        bbox_heights=bbox_heights,
+                        pred_keypoints=pred_kpts_trimmed_pixels,  # In 512×512 pixel space
+                        gt_keypoints=gt_kpts_trimmed_pixels,      # In 512×512 pixel space
+                        bbox_widths=bbox_widths_pck,              # FIXED: Use 512×512, not original bbox
+                        bbox_heights=bbox_heights_pck,            # FIXED: Use 512×512, not original bbox
                         category_ids=batch.get('category_ids', None),
                         visibility=visibility_list  # Now includes actual visibility from metadata
                     )

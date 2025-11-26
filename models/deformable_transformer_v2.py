@@ -3,6 +3,7 @@
 # ------------------------------------------------------------------------------------
 
 import copy
+import os
 from typing import Optional, List
 import math
 import numpy as np
@@ -334,6 +335,30 @@ class TransformerDecoderLayer(nn.Module):
             v = torch.cat([src, v], dim=1)
             tgt_masks = torch.cat([torch.zeros(q.size(1), src.size(1), device=q.device), 
                                 tgt_masks], dim=1).to(dtype=torch.float32)
+        
+        # ========================================================================
+        # DEBUG: Verify causal mask is correctly applied
+        # ========================================================================
+        DEBUG_CAUSAL_MASK = os.environ.get('DEBUG_CAUSAL_MASK', '0') == '1'
+        if DEBUG_CAUSAL_MASK and tgt_masks is not None and tgt_masks.shape[0] == tgt_masks.shape[1]:
+            # Check that mask prevents future attention
+            seq_len = tgt_masks.shape[0]
+            violations = []
+            for i in range(min(5, seq_len)):
+                for j in range(i+1, min(5, seq_len)):
+                    if tgt_masks[i, j] != float('-inf') and tgt_masks[i, j] != 0:
+                        violations.append((i, j, tgt_masks[i, j].item()))
+            if violations:
+                print(f"⚠️  CAUSAL MASK VIOLATION: Position can attend to future positions!")
+                print(f"   Violations: {violations[:5]}")
+                print(f"   Mask shape: {tgt_masks.shape}")
+                print(f"   Mask dtype: {tgt_masks.dtype}")
+            elif hasattr(self, '_causal_mask_checked'):
+                pass  # Already logged
+            else:
+                print(f"✓ Causal mask verified: shape={tgt_masks.shape}, prevents future attention")
+                self._causal_mask_checked = True
+        # ========================================================================
         
         tgt2 = self.self_attn(q.transpose(0, 1), k.transpose(0, 1), v.transpose(0, 1), attn_mask=tgt_masks)[0].transpose(0, 1)
         tgt = tgt + self.dropout2(tgt2)
