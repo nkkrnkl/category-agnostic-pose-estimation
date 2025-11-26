@@ -282,12 +282,42 @@ def extract_keypoints_from_sequence(
     for i in range(batch_size):
         # Get valid tokens for this instance
         valid_mask = mask[i]
-        valid_coords = pred_coords[i][valid_mask]
-        valid_labels = token_labels[i][valid_mask]
+        
+        # DEBUG
+        DEBUG_EXTRACT = os.environ.get('DEBUG_EXTRACT', '0') == '1'
+        if DEBUG_EXTRACT and i < 2:  # Show first 2 samples
+            print(f"\n[DEBUG extract_keypoints_from_sequence] Sample {i}:")
+            print(f"  pred_coords[i] shape: {pred_coords[i].shape}")
+            print(f"  valid_mask shape: {valid_mask.shape}")
+            print(f"  valid_mask sum: {valid_mask.sum().item()}")
+            print(f"  valid_mask dtype: {valid_mask.dtype}")
+        
+        try:
+            valid_coords = pred_coords[i][valid_mask]
+            valid_labels = token_labels[i][valid_mask]
+        except Exception as e:
+            print(f"\n❌ ERROR on line 'valid_coords = pred_coords[i][valid_mask]':")
+            print(f"   Sample index i={i}")
+            print(f"   pred_coords[i].shape = {pred_coords[i].shape}")
+            print(f"   valid_mask.shape = {valid_mask.shape}")
+            print(f"   valid_mask.dtype = {valid_mask.dtype}")
+            print(f"   Error: {e}")
+            raise
+        
+        if DEBUG_EXTRACT and i < 2:
+            print(f"  After boolean indexing:")
+            print(f"    valid_coords shape: {valid_coords.shape}")
+            print(f"    valid_labels shape: {valid_labels.shape}")
         
         # Extract only coordinate tokens (TokenType.coord = 0)
         coord_mask = valid_labels == TokenType.coord.value
         kpts = valid_coords[coord_mask]
+        
+        if DEBUG_EXTRACT and i < 2:
+            print(f"  After coord filtering:")
+            print(f"    coord_mask shape: {coord_mask.shape}")
+            print(f"    coord_mask sum: {coord_mask.sum().item()}")
+            print(f"    kpts shape: {kpts.shape}")
         
         # Limit to max_keypoints if specified
         if max_keypoints is not None and len(kpts) > max_keypoints:
