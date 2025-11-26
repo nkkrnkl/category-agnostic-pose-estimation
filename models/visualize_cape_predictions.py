@@ -50,6 +50,49 @@ from datasets.mp100_cape import build_mp100_cape, ImageNotFoundError
 from datasets.token_types import TokenType
 from datasets.discrete_tokenizer import DiscreteTokenizer
 
+# Standard resize dimension used in preprocessing (must match dataset transforms)
+TARGET_SIZE = 512
+
+
+def ensure_image_size(image, target_size=TARGET_SIZE):
+    """
+    Ensure image is exactly target_size x target_size.
+    If not, resize it (preserving aspect ratio and padding if needed).
+    
+    Args:
+        image: numpy array (H, W, 3) or PIL Image
+        target_size: Target size (default: 512)
+    
+    Returns:
+        numpy array (target_size, target_size, 3) in uint8 format
+    """
+    if isinstance(image, Image.Image):
+        image = np.array(image)
+    
+    h, w = image.shape[:2]
+    
+    # If already correct size, return as-is
+    if h == target_size and w == target_size:
+        if image.dtype != np.uint8:
+            # Ensure uint8 format
+            if image.max() <= 1.0:
+                image = (image * 255).astype(np.uint8)
+            else:
+                image = image.astype(np.uint8)
+        return image
+    
+    # Resize to target_size x target_size
+    import cv2
+    resized = cv2.resize(image, (target_size, target_size), interpolation=cv2.INTER_CUBIC)
+    
+    if resized.dtype != np.uint8:
+        if resized.max() <= 1.0:
+            resized = (resized * 255).astype(np.uint8)
+        else:
+            resized = resized.astype(np.uint8)
+    
+    return resized
+
 
 def load_model(checkpoint_path):
     """Load trained CAPE model from checkpoint."""
@@ -98,12 +141,12 @@ def decode_sequence_to_keypoints(pred_tokens, pred_coords, tokenizer, max_keypoi
 
     Args:
         pred_tokens: (seq_len,) Token predictions
-        pred_coords: (seq_len, 2) Coordinate predictions
+        pred_coords: (seq_len, 2) Coordinate predictions (normalized [0,1] relative to 512x512)
         tokenizer: Tokenizer for decoding
         max_keypoints: Optional maximum number of keypoints to extract (stops early if reached)
 
     Returns:
-        keypoints: List of (x, y) coordinates
+        keypoints: List of (x, y) coordinates in normalized [0,1] space (relative to 512x512)
     """
     keypoints = []
 
@@ -118,12 +161,15 @@ def decode_sequence_to_keypoints(pred_tokens, pred_coords, tokenizer, max_keypoi
         if token == TokenType.coord.value:
             # Coordinates are at the SAME position as the coord token
             if i < len(pred_coords):
-                x, y = pred_coords[i]  # pred_coords stores denormalized values
+                x, y = pred_coords[i]  # pred_coords stores normalized [0,1] values
                 x_val, y_val = x.item(), y.item()
                 
-                # Filter out invalid coordinates (NaN, Inf, or out of reasonable bounds)
-                if (np.isfinite(x_val) and np.isfinite(y_val) and 
-                    -1e6 < x_val < 1e6 and -1e6 < y_val < 1e6):
+                # Clamp to [0,1] range (model may output slightly outside due to numerical precision)
+                x_val = max(0.0, min(1.0, x_val))
+                y_val = max(0.0, min(1.0, y_val))
+                
+                # Filter out invalid coordinates (NaN, Inf)
+                if (np.isfinite(x_val) and np.isfinite(y_val)):
                     keypoints.append((x_val, y_val))
 
         # Stop at EOS token
@@ -136,32 +182,57 @@ def decode_sequence_to_keypoints(pred_tokens, pred_coords, tokenizer, max_keypoi
 def visualize_pose_prediction(support_image, query_image, pred_keypoints, 
                               support_keypoints, gt_keypoints=None,
                               skeleton_edges=None, save_path=None,
-                              category_name="Unknown", pck_score=None):
+                              category_name="Unknown", pck_score=None,
+                              debug_coords=False):
     """
     Visualize predicted pose vs ground truth and support template.
     Creates a 3-panel layout: Support (GT), Ground Truth, Predicted.
 
+    CRITICAL: All keypoints are normalized [0,1] relative to 512x512 resized images.
+    The images passed in MUST be 512x512 (resized) to match the coordinate frame.
+
     Args:
-        support_image: PIL Image or numpy array (H, W, 3) - support image
-        query_image: PIL Image or numpy array (H, W, 3) - query image
-        pred_keypoints: List of (x, y) predicted keypoint coordinates (normalized [0,1])
-        support_keypoints: List of (x, y) support keypoint coordinates (normalized [0,1])
-        gt_keypoints: Optional list of (x, y) ground truth query keypoints (normalized [0,1])
+        support_image: PIL Image or numpy array (H, W, 3) - MUST be 512x512 resized image
+        query_image: PIL Image or numpy array (H, W, 3) - MUST be 512x512 resized image
+        pred_keypoints: List of (x, y) predicted keypoint coordinates (normalized [0,1] relative to 512x512)
+        support_keypoints: List of (x, y) support keypoint coordinates (normalized [0,1] relative to 512x512)
+        gt_keypoints: Optional list of (x, y) ground truth query keypoints (normalized [0,1] relative to 512x512)
         skeleton_edges: List of [src, dst] edge pairs (1-indexed from MP-100)
         save_path: Path to save visualization
         category_name: Category name for title
         pck_score: Optional PCK score to display
+        debug_coords: If True, print coordinate comparison for debugging
     """
     if isinstance(support_image, Image.Image):
         support_image = np.array(support_image)
     if isinstance(query_image, Image.Image):
         query_image = np.array(query_image)
 
-    # Create figure with three subplots
-    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(24, 8))
-
+    # CRITICAL: Verify images are 512x512 (the coordinate frame)
     support_h, support_w = support_image.shape[:2]
     query_h, query_w = query_image.shape[:2]
+    
+    # Use the global TARGET_SIZE constant
+    
+    # Warn if images are not 512x512 (coordinate mismatch)
+    if support_w != TARGET_SIZE or support_h != TARGET_SIZE:
+        import warnings
+        warnings.warn(
+            f"Support image size ({support_w}x{support_h}) != {TARGET_SIZE}x{TARGET_SIZE}. "
+            f"Coordinates are normalized relative to {TARGET_SIZE}x{TARGET_SIZE}. "
+            f"Visualization may be misaligned!"
+        )
+    
+    if query_w != TARGET_SIZE or query_h != TARGET_SIZE:
+        import warnings
+        warnings.warn(
+            f"Query image size ({query_w}x{query_h}) != {TARGET_SIZE}x{TARGET_SIZE}. "
+            f"Coordinates are normalized relative to {TARGET_SIZE}x{TARGET_SIZE}. "
+            f"Visualization may be misaligned!"
+        )
+
+    # Create figure with three subplots
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(24, 8))
 
     # Panel 1: Support (GT) - Support image with ground truth keypoints
     ax1.imshow(support_image)
@@ -171,11 +242,17 @@ def visualize_pose_prediction(support_image, query_image, pred_keypoints,
     # Draw support keypoints (green circles)
     if support_keypoints:
         support_kpts_array = np.array(support_keypoints)
-        # Denormalize to support image size
+        # CRITICAL FIX: Denormalize by TARGET_SIZE (512), not image dimensions
+        # Coordinates are normalized relative to 512x512, regardless of actual image size
         if support_kpts_array.max() <= 1.0:
             support_kpts_array = support_kpts_array.copy()
-            support_kpts_array[:, 0] *= support_w
-            support_kpts_array[:, 1] *= support_h
+            support_kpts_array[:, 0] *= TARGET_SIZE
+            support_kpts_array[:, 1] *= TARGET_SIZE
+        # If already in pixel coordinates (max > 1.0), use as-is but clamp to image bounds
+        else:
+            support_kpts_array = support_kpts_array.copy()
+            support_kpts_array[:, 0] = np.clip(support_kpts_array[:, 0], 0, support_w - 1)
+            support_kpts_array[:, 1] = np.clip(support_kpts_array[:, 1], 0, support_h - 1)
         
         ax1.scatter(support_kpts_array[:, 0], support_kpts_array[:, 1],
                    c='lime', s=120, marker='o', edgecolors='black', linewidths=2,
@@ -210,11 +287,17 @@ def visualize_pose_prediction(support_image, query_image, pred_keypoints,
     # Draw ground truth keypoints (cyan circles)
     if gt_keypoints:
         gt_kpts_array = np.array(gt_keypoints)
-        # Denormalize to query image size
+        # CRITICAL FIX: Denormalize by TARGET_SIZE (512), not image dimensions
+        # Coordinates are normalized relative to 512x512, regardless of actual image size
         if gt_kpts_array.max() <= 1.0:
             gt_kpts_array = gt_kpts_array.copy()
-            gt_kpts_array[:, 0] *= query_w
-            gt_kpts_array[:, 1] *= query_h
+            gt_kpts_array[:, 0] *= TARGET_SIZE
+            gt_kpts_array[:, 1] *= TARGET_SIZE
+        # If already in pixel coordinates (max > 1.0), use as-is but clamp to image bounds
+        else:
+            gt_kpts_array = gt_kpts_array.copy()
+            gt_kpts_array[:, 0] = np.clip(gt_kpts_array[:, 0], 0, query_w - 1)
+            gt_kpts_array[:, 1] = np.clip(gt_kpts_array[:, 1], 0, query_h - 1)
         
         ax2.scatter(gt_kpts_array[:, 0], gt_kpts_array[:, 1],
                    c='cyan', s=120, marker='o', edgecolors='black', linewidths=2,
@@ -250,11 +333,17 @@ def visualize_pose_prediction(support_image, query_image, pred_keypoints,
     # Draw predicted keypoints (red X marks)
     if pred_keypoints:
         pred_kpts_array = np.array(pred_keypoints)
-        # Denormalize to query image size
+        # CRITICAL FIX: Denormalize by TARGET_SIZE (512), not image dimensions
+        # Coordinates are normalized relative to 512x512, regardless of actual image size
         if pred_kpts_array.max() <= 1.0:
             pred_kpts_array = pred_kpts_array.copy()
-            pred_kpts_array[:, 0] *= query_w
-            pred_kpts_array[:, 1] *= query_h
+            pred_kpts_array[:, 0] *= TARGET_SIZE
+            pred_kpts_array[:, 1] *= TARGET_SIZE
+        # If already in pixel coordinates (max > 1.0), use as-is but clamp to image bounds
+        else:
+            pred_kpts_array = pred_kpts_array.copy()
+            pred_kpts_array[:, 0] = np.clip(pred_kpts_array[:, 0], 0, query_w - 1)
+            pred_kpts_array[:, 1] = np.clip(pred_kpts_array[:, 1], 0, query_h - 1)
 
         ax3.scatter(pred_kpts_array[:, 0], pred_kpts_array[:, 1],
                    c='red', s=120, marker='x', linewidths=3,
@@ -276,6 +365,66 @@ def visualize_pose_prediction(support_image, query_image, pred_keypoints,
                         ax3.plot([x1, x2], [y1, y2], 'red', linewidth=2, alpha=0.6, zorder=2)
 
     ax3.legend(loc='upper right', fontsize=10)
+
+    # ========================================================================
+    # COORDINATE COMPARISON DEBUGGING
+    # ========================================================================
+    # Print numerical comparison of GT vs predicted coordinates
+    # This helps diagnose visualization/coordinate bugs
+    # ========================================================================
+    if debug_coords and gt_keypoints and pred_keypoints:
+        print(f"\n{'='*80}")
+        print(f"COORDINATE COMPARISON DEBUG: {category_name}")
+        print(f"{'='*80}")
+        
+        # Convert to arrays for comparison
+        gt_array = np.array(gt_keypoints)
+        pred_array = np.array(pred_keypoints)
+        
+        # Denormalize both to pixel coordinates (512x512 frame)
+        if gt_array.max() <= 1.0:
+            gt_px = gt_array.copy() * TARGET_SIZE
+        else:
+            gt_px = gt_array.copy()
+        
+        if pred_array.max() <= 1.0:
+            pred_px = pred_array.copy() * TARGET_SIZE
+        else:
+            pred_px = pred_array.copy()
+        
+        # Compute differences
+        num_kpts = min(len(gt_px), len(pred_px))
+        if num_kpts > 0:
+            gt_trimmed = gt_px[:num_kpts]
+            pred_trimmed = pred_px[:num_kpts]
+            abs_diff = np.abs(gt_trimmed - pred_trimmed)
+            euclidean_dist = np.sqrt(np.sum(abs_diff ** 2, axis=1))
+            
+            print(f"  Number of keypoints: {num_kpts}")
+            print(f"  GT coordinates (pixels, first 5):")
+            for i in range(min(5, num_kpts)):
+                print(f"    Kpt {i}: ({gt_trimmed[i,0]:.2f}, {gt_trimmed[i,1]:.2f})")
+            print(f"  Pred coordinates (pixels, first 5):")
+            for i in range(min(5, num_kpts)):
+                print(f"    Kpt {i}: ({pred_trimmed[i,0]:.2f}, {pred_trimmed[i,1]:.2f})")
+            print(f"  Absolute differences (pixels, first 5):")
+            for i in range(min(5, num_kpts)):
+                print(f"    Kpt {i}: dx={abs_diff[i,0]:.2f}, dy={abs_diff[i,1]:.2f}, dist={euclidean_dist[i]:.2f}")
+            
+            mean_dist = np.mean(euclidean_dist)
+            max_dist = np.max(euclidean_dist)
+            print(f"  Mean Euclidean distance: {mean_dist:.2f} pixels")
+            print(f"  Max Euclidean distance: {max_dist:.2f} pixels")
+            
+            # If PCK=1.0, we expect very small differences (< 1 pixel)
+            if pck_score is not None and pck_score >= 0.99:
+                if mean_dist > 5.0:
+                    print(f"  ⚠️  WARNING: PCK={pck_score:.1%} but mean distance={mean_dist:.2f}px!")
+                    print(f"     This indicates a visualization/coordinate bug, not a model accuracy issue.")
+                else:
+                    print(f"  ✓ Coordinates match well (mean dist={mean_dist:.2f}px) - visualization should align")
+        
+        print(f"{'='*80}\n")
 
     plt.tight_layout()
 
@@ -505,8 +654,9 @@ def visualize_from_checkpoint(args):
                                 )
                             
                             # Visualize (include checkpoint epoch in filename to distinguish different checkpoints)
-                            vis_support_image = np.array(support_image)
-                            vis_query_image = np.array(query_image)
+                            # CRITICAL: Ensure images are 512x512 to match coordinate frame
+                            vis_support_image = ensure_image_size(support_image, TARGET_SIZE)
+                            vis_query_image = ensure_image_size(query_image, TARGET_SIZE)
                             
                             save_path = output_dir / f"single_image_{single_image_path.stem}_epoch{checkpoint_epoch}.png"
                             visualize_pose_prediction(
@@ -518,7 +668,8 @@ def visualize_from_checkpoint(args):
                                 skeleton_edges=skeleton_edges,
                                 save_path=save_path,
                                 category_name=f"Single Image: {single_image_path.name}",
-                                pck_score=pck_score
+                                pck_score=pck_score,
+                                debug_coords=True  # Enable coordinate debugging
                             )
                             
                             print(f"\n✓ Visualization complete!")
@@ -605,17 +756,22 @@ def visualize_from_checkpoint(args):
                 )
             
             # Convert images for visualization
+            # CRITICAL: Ensure images are 512x512 to match coordinate frame
             if isinstance(support_data['image'], torch.Tensor):
                 vis_support_image = support_data['image'].permute(1, 2, 0).numpy()
                 vis_support_image = (vis_support_image * 255).astype(np.uint8)
             else:
-                vis_support_image = support_data['image']
+                vis_support_image = np.array(support_data['image'])
             
             if isinstance(query_data['image'], torch.Tensor):
                 vis_query_image = query_data['image'].permute(1, 2, 0).numpy()
                 vis_query_image = (vis_query_image * 255).astype(np.uint8)
             else:
-                vis_query_image = query_data['image']
+                vis_query_image = np.array(query_data['image'])
+            
+            # Ensure 512x512 size (should already be, but verify)
+            vis_support_image = ensure_image_size(vis_support_image, TARGET_SIZE)
+            vis_query_image = ensure_image_size(vis_query_image, TARGET_SIZE)
             
             # Visualize (include checkpoint epoch in filename to distinguish different checkpoints)
             save_path = output_dir / f"single_image_{single_image_path.stem}_epoch{checkpoint_epoch}.png"
@@ -628,7 +784,8 @@ def visualize_from_checkpoint(args):
                 skeleton_edges=skeleton_edges,
                 save_path=save_path,
                 category_name=f"Single Image: {single_image_path.name}",
-                pck_score=pck_score
+                pck_score=pck_score,
+                debug_coords=True  # Enable coordinate debugging
             )
             
             print(f"\n✓ Visualization complete!")
@@ -819,17 +976,22 @@ def visualize_from_checkpoint(args):
                 )
 
             # Convert images for visualization
+            # CRITICAL: Ensure images are 512x512 to match coordinate frame
             if isinstance(support_data['image'], torch.Tensor):
                 vis_support_image = support_data['image'].permute(1, 2, 0).numpy()
                 vis_support_image = (vis_support_image * 255).astype(np.uint8)
             else:
-                vis_support_image = support_data['image']
+                vis_support_image = np.array(support_data['image'])
             
             if isinstance(data['image'], torch.Tensor):
                 vis_query_image = data['image'].permute(1, 2, 0).numpy()
                 vis_query_image = (vis_query_image * 255).astype(np.uint8)
             else:
-                vis_query_image = data['image']
+                vis_query_image = np.array(data['image'])
+
+            # Ensure 512x512 size (should already be, but verify)
+            vis_support_image = ensure_image_size(vis_support_image, TARGET_SIZE)
+            vis_query_image = ensure_image_size(vis_query_image, TARGET_SIZE)
 
             # Visualize with both images
             save_path = output_dir / f"{cat_name}_query{sample_idx}_support{support_idx}.png"
@@ -842,7 +1004,8 @@ def visualize_from_checkpoint(args):
                 skeleton_edges=skeleton_edges,
                 save_path=save_path,
                 category_name=cat_name,
-                pck_score=pck_score
+                pck_score=pck_score,
+                debug_coords=(pck_score is not None and pck_score >= 0.99)  # Debug if PCK is high
             )
 
             pck_str = f" | PCK: {pck_score:.2%}" if pck_score is not None else ""
