@@ -631,27 +631,36 @@ def visualize_from_checkpoint(args):
                             # Compute PCK
                             pck_score = None
                             if query_gt_coords and len(pred_keypoints) > 0:
-                                from util.eval_utils import compute_pck_bbox
-                                # NOTE: This is a direct file load path (bypasses dataset).
-                                # For consistency, use 512×512 (standard resize) if image was resized.
-                                # Otherwise, use original image dimensions from COCO annotations.
-                                # In practice, model expects 512×512, so use that for PCK threshold.
-                                bbox_w = 512.0  # Standard resize dimension
-                                bbox_h = 512.0  # Standard resize dimension
-                                num_kpts = min(len(pred_keypoints), len(query_gt_coords))
-                                pred_kpts_trimmed = pred_keypoints[:num_kpts]
-                                gt_kpts_trimmed = query_gt_coords[:num_kpts]
-                                vis_trimmed = visibility[:num_kpts]
-                                
-                                pck_score, num_correct, num_visible = compute_pck_bbox(
-                                    pred_keypoints=np.array(pred_kpts_trimmed),
-                                    gt_keypoints=np.array(gt_kpts_trimmed),
-                                    bbox_width=bbox_w,
-                                    bbox_height=bbox_h,
-                                    visibility=np.array(vis_trimmed),
-                                    threshold=0.2,
-                                    normalize_by='diagonal'
-                                )
+                                    from util.eval_utils import compute_pck_bbox
+                                    # CRITICAL FIX: compute_pck_bbox expects coordinates in PIXEL space, not normalized [0,1]
+                                    # Denormalize coordinates before passing to compute_pck_bbox
+                                    bbox_w = TARGET_SIZE  # Standard resize dimension
+                                    bbox_h = TARGET_SIZE  # Standard resize dimension
+                                    num_kpts = min(len(pred_keypoints), len(query_gt_coords))
+                                    pred_kpts_trimmed = np.array(pred_keypoints[:num_kpts])
+                                    gt_kpts_trimmed = np.array(query_gt_coords[:num_kpts])
+                                    vis_trimmed = visibility[:num_kpts]
+                                    
+                                    # Denormalize coordinates to pixel space for PCK computation
+                                    if pred_kpts_trimmed.max() <= 1.0:
+                                        pred_kpts_pixels = pred_kpts_trimmed * TARGET_SIZE
+                                    else:
+                                        pred_kpts_pixels = pred_kpts_trimmed
+                                    
+                                    if gt_kpts_trimmed.max() <= 1.0:
+                                        gt_kpts_pixels = gt_kpts_trimmed * TARGET_SIZE
+                                    else:
+                                        gt_kpts_pixels = gt_kpts_trimmed
+                                    
+                                    pck_score, num_correct, num_visible = compute_pck_bbox(
+                                        pred_keypoints=pred_kpts_pixels,
+                                        gt_keypoints=gt_kpts_pixels,
+                                        bbox_width=bbox_w,
+                                        bbox_height=bbox_h,
+                                        visibility=np.array(vis_trimmed),
+                                        threshold=0.2,
+                                        normalize_by='diagonal'
+                                    )
                             
                             # Visualize (include checkpoint epoch in filename to distinguish different checkpoints)
                             # CRITICAL: Ensure images are 512x512 to match coordinate frame
@@ -734,20 +743,33 @@ def visualize_from_checkpoint(args):
             pck_score = None
             if query_gt_coords and len(pred_keypoints) > 0:
                 from util.eval_utils import compute_pck_bbox
+                # CRITICAL FIX: compute_pck_bbox expects coordinates in PIXEL space, not normalized [0,1]
+                # We need to denormalize coordinates before passing to compute_pck_bbox
                 # Use resized image dimensions (width/height) for PCK threshold
-                # These are guaranteed to be 512×512 after resize, matching the
-                # coordinate normalization. bbox_width/height may be original bbox size.
-                bbox_w = query_data.get('width', query_data.get('bbox_width', 512.0))
-                bbox_h = query_data.get('height', query_data.get('bbox_height', 512.0))
+                # These are guaranteed to be 512×512 after resize, matching the coordinate normalization
+                bbox_w = query_data.get('width', query_data.get('bbox_width', TARGET_SIZE))
+                bbox_h = query_data.get('height', query_data.get('bbox_height', TARGET_SIZE))
                 num_kpts = min(len(pred_keypoints), len(query_gt_coords))
-                pred_kpts_trimmed = pred_keypoints[:num_kpts]
-                gt_kpts_trimmed = query_gt_coords[:num_kpts]
+                pred_kpts_trimmed = np.array(pred_keypoints[:num_kpts])
+                gt_kpts_trimmed = np.array(query_gt_coords[:num_kpts])
                 query_visibility = query_data.get('visibility', [1] * len(query_gt_coords))
                 vis_trimmed = query_visibility[:num_kpts]
                 
+                # Denormalize coordinates to pixel space for PCK computation
+                # Coordinates are normalized [0,1] relative to TARGET_SIZE (512)
+                if pred_kpts_trimmed.max() <= 1.0:
+                    pred_kpts_pixels = pred_kpts_trimmed * TARGET_SIZE
+                else:
+                    pred_kpts_pixels = pred_kpts_trimmed
+                
+                if gt_kpts_trimmed.max() <= 1.0:
+                    gt_kpts_pixels = gt_kpts_trimmed * TARGET_SIZE
+                else:
+                    gt_kpts_pixels = gt_kpts_trimmed
+                
                 pck_score, num_correct, num_visible = compute_pck_bbox(
-                    pred_keypoints=np.array(pred_kpts_trimmed),
-                    gt_keypoints=np.array(gt_kpts_trimmed),
+                    pred_keypoints=pred_kpts_pixels,
+                    gt_keypoints=gt_kpts_pixels,
                     bbox_width=bbox_w,
                     bbox_height=bbox_h,
                     visibility=np.array(vis_trimmed),
@@ -951,23 +973,36 @@ def visualize_from_checkpoint(args):
             if query_gt_coords and len(pred_keypoints) > 0:
                 from util.eval_utils import compute_pck_bbox
                 
+                # CRITICAL FIX: compute_pck_bbox expects coordinates in PIXEL space, not normalized [0,1]
+                # Denormalize coordinates before passing to compute_pck_bbox
                 # Get bbox dimensions for normalization
                 # Use resized image dimensions (width/height) for PCK threshold
-                # These are guaranteed to be 512×512 after resize, matching the
-                # coordinate normalization. bbox_width/height may be original bbox size.
-                bbox_w = data.get('width', data.get('bbox_width', 512.0))
-                bbox_h = data.get('height', data.get('bbox_height', 512.0))
+                # These are guaranteed to be 512×512 after resize, matching the coordinate normalization
+                bbox_w = data.get('width', data.get('bbox_width', TARGET_SIZE))
+                bbox_h = data.get('height', data.get('bbox_height', TARGET_SIZE))
                 
                 # Trim to actual number of keypoints for this category
                 num_kpts = min(len(pred_keypoints), len(query_gt_coords))
-                pred_kpts_trimmed = pred_keypoints[:num_kpts]
-                gt_kpts_trimmed = query_gt_coords[:num_kpts]
+                pred_kpts_trimmed = np.array(pred_keypoints[:num_kpts])
+                gt_kpts_trimmed = np.array(query_gt_coords[:num_kpts])
                 vis_trimmed = query_visibility[:num_kpts]
+                
+                # Denormalize coordinates to pixel space for PCK computation
+                # Coordinates are normalized [0,1] relative to TARGET_SIZE (512)
+                if pred_kpts_trimmed.max() <= 1.0:
+                    pred_kpts_pixels = pred_kpts_trimmed * TARGET_SIZE
+                else:
+                    pred_kpts_pixels = pred_kpts_trimmed
+                
+                if gt_kpts_trimmed.max() <= 1.0:
+                    gt_kpts_pixels = gt_kpts_trimmed * TARGET_SIZE
+                else:
+                    gt_kpts_pixels = gt_kpts_trimmed
                 
                 # Compute PCK
                 pck_score, num_correct, num_visible = compute_pck_bbox(
-                    pred_keypoints=np.array(pred_kpts_trimmed),
-                    gt_keypoints=np.array(gt_kpts_trimmed),
+                    pred_keypoints=pred_kpts_pixels,
+                    gt_keypoints=gt_kpts_pixels,
                     bbox_width=bbox_w,
                     bbox_height=bbox_h,
                     visibility=np.array(vis_trimmed),
