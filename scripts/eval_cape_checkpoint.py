@@ -497,8 +497,15 @@ def run_evaluation(model: nn.Module, dataloader: DataLoader, device: torch.devic
                 gt_kpts_trimmed = []
                 
                 for idx, meta in enumerate(query_metadata):
-                    bbox_w = meta.get('bbox_width', 512.0)
-                    bbox_h = meta.get('bbox_height', 512.0)
+                    # OLD (Current Buggy Code)
+                    # bbox_w = meta.get('bbox_width', 512.0)  <-- likely 1000+ px
+                    # bbox_h = meta.get('bbox_height', 512.0) <-- likely 1000+ px
+
+                    # NEW (Corrected Code)
+                    # Since pred_kpts_trimmed_pixels are scaled to 512, the "bbox" they live in is 512x512.
+                    bbox_w = 512.0
+                    bbox_h = 512.0
+
                     bbox_widths.append(bbox_w)
                     bbox_heights.append(bbox_h)
                     

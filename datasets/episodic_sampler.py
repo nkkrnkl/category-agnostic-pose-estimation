@@ -139,7 +139,7 @@ class EpisodicDataset(data.Dataset):
 
     def __init__(self, base_dataset, category_split_file, split='train',
                  num_queries_per_episode=2, episodes_per_epoch=1000, seed=None,
-                 fixed_episodes=False):
+                 fixed_episodes=False, load_support_images=True):
         """
         Args:
             base_dataset: MP100CAPE dataset instance
@@ -149,10 +149,14 @@ class EpisodicDataset(data.Dataset):
             episodes_per_epoch: Number of episodes per training epoch
             seed: Random seed
             fixed_episodes: If True, pre-generate episodes once and reuse (for stable val)
+            load_support_images: If True, load support images (for visualization).
+                                If False, skip loading to save I/O, CPU, and memory.
+                                The model only uses support_coords, not support images.
         """
         self.base_dataset = base_dataset
         self.episodes_per_epoch = episodes_per_epoch
         self.fixed_episodes = fixed_episodes
+        self.load_support_images = load_support_images
         self._cached_episodes = None  # Will store pre-generated episodes if fixed_episodes=True
 
         # Create episodic sampler
@@ -198,12 +202,22 @@ class EpisodicDataset(data.Dataset):
         max_retries = 100  # High limit to prevent infinite loops, but should rarely be hit
         retry_count = 0
         
+        # Track if we're using fixed episodes
+        use_fixed = self.fixed_episodes and self._cached_episodes is not None
+        
         while retry_count < max_retries:
             try:
-                # Sample episode (use cached if fixed_episodes=True, otherwise random)
-                if self.fixed_episodes and self._cached_episodes is not None:
+                # Sample episode
+                # CRITICAL FIX: On retry (count > 0), fall back to random sampling
+                # because the fixed episode at 'idx' is evidently broken/missing
+                if use_fixed and retry_count == 0:
+                    # First attempt: use the cached fixed episode
                     episode = self._cached_episodes[idx % len(self._cached_episodes)]
                 else:
+                    # Retry OR random mode: sample a new random episode
+                    if retry_count == 1 and use_fixed:
+                        print(f"⚠️  Fixed episode {idx} failed (missing image). "
+                              f"Falling back to random sampling.")
                     episode = self.sampler.sample_episode()
 
                 # Load support image
@@ -230,6 +244,16 @@ class EpisodicDataset(data.Dataset):
                 h, w = support_data['height'], support_data['width']  # Both are 512 after resize
                 support_coords[:, 0] /= w  # Normalize x to [0, 1]
                 support_coords[:, 1] /= h  # Normalize y to [0, 1]
+                
+                # ================================================================
+                # SAFETY CLAMP: Ensure coordinates stay in [0, 1] after augmentation
+                # ================================================================
+                # Geometric augmentation (Affine, HorizontalFlip) can push keypoints
+                # slightly outside image bounds. Clamp to valid range.
+                # Note: Out-of-bounds keypoints will also be marked as invisible
+                # by the visibility mask, but clamping prevents numerical issues.
+                # ================================================================
+                support_coords = support_coords.clamp(0.0, 1.0)
 
                 # ================================================================
                 # CRITICAL FIX: Create support mask based on visibility
@@ -344,8 +368,17 @@ class EpisodicDataset(data.Dataset):
                     # ================================================================
 
                 # Successfully loaded all images - return the episode
+                # ================================================================
+                # PERFORMANCE OPTIMIZATION: Skip support image if not needed
+                # ================================================================
+                # The model only uses support_coords and support_mask (geometry).
+                # Support images are only needed for visualization (eval script).
+                # Skipping them saves: disk I/O, CPU transforms, GPU memory.
+                # ================================================================
+                support_image = support_data['image'] if self.load_support_images else None
+                
                 return {
-                    'support_image': support_data['image'],
+                    'support_image': support_image,
                     'support_coords': support_coords,
                     'support_mask': support_mask,
                     'support_skeleton': support_skeleton,
@@ -410,8 +443,17 @@ def episodic_collate_fn(batch):
         query_metadata_list.extend(episode['query_metadata'])  # NEW: Extract query metadata
         category_ids.append(episode['category_id'])
 
-    # Stack support images
-    support_images = torch.stack(support_images)  # (B, C, H, W)
+    # Stack support images (if they exist - may be None for training optimization)
+    # ========================================================================
+    # PERFORMANCE OPTIMIZATION: Support images may be None during training
+    # ========================================================================
+    # When load_support_images=False, support_image is None to save I/O.
+    # The model only uses support_coords, not support images.
+    # ========================================================================
+    if support_images[0] is not None:
+        support_images = torch.stack(support_images)  # (B, C, H, W)
+    else:
+        support_images = None  # Skip stacking - will remain None
 
     # Pad support coordinates to max length in batch
     max_support_kpts = max(coords.shape[0] for coords in support_coords_list)
@@ -469,7 +511,10 @@ def episodic_collate_fn(batch):
     # Example: [A, B] with repeats=2 → [A, A, B, B]
     support_coords = support_coords.repeat_interleave(queries_per_episode, dim=0)  # (B*K, max_kpts, 2)
     support_masks = support_masks.repeat_interleave(queries_per_episode, dim=0)  # (B*K, max_kpts)
-    support_images = support_images.repeat_interleave(queries_per_episode, dim=0)  # (B*K, C, H, W)
+    
+    # Only repeat support images if they exist (may be None for training optimization)
+    if support_images is not None:
+        support_images = support_images.repeat_interleave(queries_per_episode, dim=0)  # (B*K, C, H, W)
     
     # Repeat support metadata (list) K times
     support_metadata_repeated = []
@@ -527,7 +572,7 @@ def episodic_collate_fn(batch):
 def build_episodic_dataloader(base_dataset, category_split_file, split='train',
                               batch_size=2, num_queries_per_episode=2,
                               episodes_per_epoch=1000, num_workers=2, seed=None,
-                              fixed_episodes=False):
+                              fixed_episodes=False, load_support_images=True):
     """
     Build episodic dataloader for CAPE training/validation/testing.
 
@@ -541,6 +586,9 @@ def build_episodic_dataloader(base_dataset, category_split_file, split='train',
         num_workers: Number of worker processes
         seed: Random seed
         fixed_episodes: If True, pre-generate episodes once and reuse (for stable val curves)
+        load_support_images: If True, load support images (needed for visualization).
+                            If False, skip to save I/O, CPU, and GPU memory.
+                            The model only uses support_coords, not images.
 
     Returns:
         dataloader: DataLoader with episodic sampling
@@ -553,7 +601,8 @@ def build_episodic_dataloader(base_dataset, category_split_file, split='train',
         num_queries_per_episode=num_queries_per_episode,
         episodes_per_epoch=episodes_per_epoch,
         seed=seed,
-        fixed_episodes=fixed_episodes
+        fixed_episodes=fixed_episodes,
+        load_support_images=load_support_images
     )
 
     # Create dataloader
