@@ -632,7 +632,7 @@ def episodic_collate_fn(batch):
 
 def build_episodic_dataloader(base_dataset, category_split_file, split='train',
                               batch_size=2, num_queries_per_episode=2, num_support_per_episode=1,
-                              episodes_per_epoch=1000, num_workers=2, seed=None,
+                              episodes_per_epoch=1000, num_workers=16, seed=None,
                               debug_single_image=None, debug_single_image_category=None):
     """
     Build episodic dataloader for CAPE training/validation/testing.

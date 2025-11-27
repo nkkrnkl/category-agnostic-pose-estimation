@@ -47,7 +47,7 @@ else
     echo ""
     EPOCHS=300
     EPISODES_PER_EPOCH=1000
-    BATCH_SIZE=2
+    BATCH_SIZE=64
     NUM_QUERIES=2
 fi
 

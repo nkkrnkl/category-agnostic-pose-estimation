@@ -92,8 +92,8 @@ def get_args_parser():
     parser.add_argument('--lr_backbone', default=1e-5, type=float)
     parser.add_argument('--lr_linear_proj_names', default=['sampling_offsets'], type=str, nargs='+')
     parser.add_argument('--lr_linear_proj_mult', default=0.1, type=float)
-    parser.add_argument('--batch_size', default=2, type=int,
-                        help='Number of episodes per batch')
+    parser.add_argument('--batch_size', default=64, type=int,
+                        help='Number of episodes per batch (optimized for A100: 64)')
     parser.add_argument('--accumulation_steps', default=4, type=int,
                         help='Number of mini-batches to accumulate gradients over (effective_batch_size = batch_size * accumulation_steps)')
     parser.add_argument('--weight_decay', default=1e-4, type=float)
@@ -191,7 +191,8 @@ def get_args_parser():
     parser.add_argument('--seed', default=42, type=int)
     parser.add_argument('--resume', default='', help='Resume from checkpoint')
     parser.add_argument('--start_epoch', default=0, type=int)
-    parser.add_argument('--num_workers', default=2, type=int)
+    parser.add_argument('--num_workers', default=16, type=int,
+                        help='Number of DataLoader worker processes (optimized for A100: 16)')
     parser.add_argument('--job_name', default='cape_episodic', type=str)
 
     # Logging
