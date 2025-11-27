@@ -216,6 +216,10 @@ class CAPEModel(nn.Module):
         # - Old SupportPoseGraphEncoder: expects True = valid (no conversion needed)
         # - New GeometricSupportEncoder: expects True = invalid (needs inversion)
         # ========================================================================
+        # Ensure mask is boolean before operations
+        if support_mask.dtype != torch.bool:
+            support_mask = support_mask.bool()
+        
         if self.use_geometric_encoder:
             # GeometricSupportEncoder expects True = invalid/invisible
             # Invert mask: True (valid) → False (valid), False (invalid) → True (invalid)
@@ -331,6 +335,10 @@ class CAPEModel(nn.Module):
         # - Old SupportPoseGraphEncoder: expects True = valid (no conversion needed)
         # - New GeometricSupportEncoder: expects True = invalid (needs inversion)
         # ========================================================================
+        # Ensure mask is boolean before operations
+        if support_mask.dtype != torch.bool:
+            support_mask = support_mask.bool()
+        
         if self.use_geometric_encoder:
             # GeometricSupportEncoder expects True = invalid/invisible
             # Invert mask: True (valid) → False (valid), False (invalid) → True (invalid)
