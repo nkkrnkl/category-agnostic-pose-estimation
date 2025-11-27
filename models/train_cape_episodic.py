@@ -96,7 +96,22 @@ def get_args_parser():
                         help='Number of mini-batches to accumulate gradients over (effective_batch_size = batch_size * accumulation_steps)')
     parser.add_argument('--weight_decay', default=1e-4, type=float)
     parser.add_argument('--epochs', default=300, type=int)
-    parser.add_argument('--lr_drop', default='200,250', type=str)
+    parser.add_argument('--lr_drop', default='200,250', type=str,
+                        help='Epochs to drop LR (for multistep scheduler)')
+    
+    # Learning rate scheduler options
+    parser.add_argument('--scheduler', default='cosine_warmrestarts',
+                        choices=['multistep', 'cosine_warmrestarts', 'onecycle'],
+                        help='LR scheduler type: multistep (classic), cosine_warmrestarts (escapes plateaus), onecycle')
+    parser.add_argument('--warmup_epochs', default=5, type=int,
+                        help='Number of warmup epochs (0 to disable)')
+    parser.add_argument('--T_0', default=20, type=int,
+                        help='CosineAnnealingWarmRestarts: initial restart period in epochs')
+    parser.add_argument('--T_mult', default=2, type=int,
+                        help='CosineAnnealingWarmRestarts: period multiplier after each restart')
+    parser.add_argument('--eta_min', default=1e-6, type=float,
+                        help='Minimum learning rate for cosine schedulers')
+    
     parser.add_argument('--early_stopping_patience', default=20, type=int,
                         help='Stop training if PCK does not improve for N epochs (0 to disable)')
     parser.add_argument('--clip_max_norm', default=0.1, type=float,
@@ -400,6 +415,16 @@ def main(args):
         category_split_file = Path(temp_split_path)
         print(f"Using temporary category split: {category_split_file}\n")
 
+    # ========================================================================
+    # PERFORMANCE OPTIMIZATION: Skip loading support images during training
+    # ========================================================================
+    # The model only uses support_coords (geometry), not support images.
+    # Setting load_support_images=False saves:
+    #   - Disk I/O: ~2000 image reads per epoch
+    #   - CPU: Image transforms (resize, augmentation)
+    #   - GPU Memory: ~200MB per batch (B*K*3*512*512 floats)
+    #   - GPU Bandwidth: repeat_interleave duplication
+    # ========================================================================
     train_loader = build_episodic_dataloader(
         base_dataset=train_dataset,
         category_split_file=str(category_split_file),
@@ -408,7 +433,8 @@ def main(args):
         num_queries_per_episode=args.num_queries_per_episode,
         episodes_per_epoch=args.episodes_per_epoch,
         num_workers=args.num_workers,
-        seed=args.seed
+        seed=args.seed,
+        load_support_images=False  # PERFORMANCE: Skip unused support images
     )
 
     # ========================================================================
@@ -448,7 +474,8 @@ def main(args):
         episodes_per_epoch=args.val_episodes_per_epoch,
         num_workers=args.num_workers,
         seed=val_seed,
-        fixed_episodes=args.fixed_val_episodes  # New: cache episodes for stable curves
+        fixed_episodes=args.fixed_val_episodes,  # New: cache episodes for stable curves
+        load_support_images=False  # PERFORMANCE: Skip unused support images
     )
 
     print(f"Train episodes/epoch: {len(train_loader) * args.batch_size}")
@@ -473,9 +500,82 @@ def main(args):
     ]
     optimizer = torch.optim.AdamW(param_dicts, lr=args.lr, weight_decay=args.weight_decay)
 
-    # Learning rate scheduler
-    lr_drop_epochs = [int(x) for x in args.lr_drop.split(',')]
-    lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, lr_drop_epochs)
+    # ========================================================================
+    # Learning Rate Scheduler with Optional Warmup
+    # ========================================================================
+    # Options:
+    #   - multistep: Classic step decay at fixed epochs (original behavior)
+    #   - cosine_warmrestarts: SGDR - escapes local minima with periodic LR restarts
+    #   - onecycle: Single cycle from low → high → low LR (fast convergence)
+    #
+    # CosineAnnealingWarmRestarts is recommended for escaping plateaus:
+    #   - Every T_0 epochs, LR "restarts" to a high value
+    #   - This provides gradient energy to escape local minima
+    #   - T_mult=2 means periods double: 20, 40, 80, 160 epochs
+    # ========================================================================
+    from torch.optim.lr_scheduler import (
+        MultiStepLR, 
+        CosineAnnealingWarmRestarts,
+        OneCycleLR,
+        LinearLR,
+        SequentialLR
+    )
+    
+    def build_scheduler(optimizer, args, steps_per_epoch=None):
+        """Build learning rate scheduler with optional warmup."""
+        
+        if args.scheduler == 'multistep':
+            lr_drop_epochs = [int(x) for x in args.lr_drop.split(',')]
+            main_scheduler = MultiStepLR(optimizer, lr_drop_epochs)
+            
+        elif args.scheduler == 'cosine_warmrestarts':
+            main_scheduler = CosineAnnealingWarmRestarts(
+                optimizer,
+                T_0=args.T_0,
+                T_mult=args.T_mult,
+                eta_min=args.eta_min
+            )
+            
+        elif args.scheduler == 'onecycle':
+            if steps_per_epoch is None:
+                raise ValueError("steps_per_epoch required for OneCycleLR")
+            main_scheduler = OneCycleLR(
+                optimizer,
+                max_lr=args.lr * 10,  # Peak at 10x base LR
+                epochs=args.epochs,
+                steps_per_epoch=steps_per_epoch,
+                pct_start=0.1,        # 10% warmup
+                anneal_strategy='cos'
+            )
+            return main_scheduler  # OneCycleLR has built-in warmup
+        
+        else:
+            raise ValueError(f"Unknown scheduler: {args.scheduler}")
+        
+        # Add warmup wrapper if requested (for multistep and cosine_warmrestarts)
+        if args.warmup_epochs > 0:
+            warmup_scheduler = LinearLR(
+                optimizer,
+                start_factor=0.1,
+                total_iters=args.warmup_epochs
+            )
+            return SequentialLR(
+                optimizer,
+                [warmup_scheduler, main_scheduler],
+                milestones=[args.warmup_epochs]
+            )
+        
+        return main_scheduler
+    
+    # Build scheduler (need train_loader length for OneCycleLR)
+    lr_scheduler = build_scheduler(optimizer, args, steps_per_epoch=len(train_loader))
+    print(f"\n✓ LR Scheduler: {args.scheduler}")
+    if args.scheduler == 'cosine_warmrestarts':
+        print(f"  - T_0 (initial period): {args.T_0} epochs")
+        print(f"  - T_mult (period multiplier): {args.T_mult}")
+        print(f"  - eta_min: {args.eta_min}")
+    if args.warmup_epochs > 0 and args.scheduler != 'onecycle':
+        print(f"  - Warmup: {args.warmup_epochs} epochs (start at 10% LR)")
     
     # Mixed Precision Training (AMP)
     scaler = None

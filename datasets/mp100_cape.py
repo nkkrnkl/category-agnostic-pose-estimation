@@ -854,65 +854,67 @@ def build_mp100_cape(image_set, args):
         raise FileNotFoundError(f"Annotation file not found: {ann_file}")
 
     # ========================================================================
-    # APPEARANCE-ONLY AUGMENTATION FOR TRAINING
+    # GEOMETRIC + APPEARANCE AUGMENTATION FOR TRAINING
     # ========================================================================
-    # Apply photometric augmentations that improve robustness WITHOUT changing
-    # geometric relationships between pixels and keypoints.
+    # Apply both geometric and photometric augmentations to improve robustness.
     #
-    # ✅ ALLOWED (appearance-only):
+    # GEOMETRIC AUGMENTATION (NEW):
+    #   - ShiftScaleRotate: ±10% shift, ±15% scale, ±30° rotation
+    #   - HorizontalFlip: 50% probability
+    #   Albumentations automatically updates keypoint coordinates via keypoint_params!
+    #
+    # APPEARANCE AUGMENTATION (existing):
     #   - Color jitter (brightness, contrast, saturation, hue)
-    #   - Gaussian noise
-    #   - Gaussian blur
+    #   - Gaussian noise / blur
     #
-    # ❌ FORBIDDEN (would change geometry):
-    #   - Random crop, flip, rotation, affine, perspective
-    #   - Any transform that moves pixels or changes spatial layout
-    #
-    # CRITICAL GUARANTEES:
-    #   1. Keypoint tensors remain BITWISE IDENTICAL (not modified at all)
-    #   2. Image geometry preserved (pixel positions unchanged)
-    #   3. Only training uses augmentation; val/test are deterministic
-    #
-    # WHY NO GEOMETRIC AUGMENTATION:
-    #   Geometric transforms require updating keypoint coordinates accordingly.
-    #   Since we want keypoint annotations to remain untouched, we only use
-    #   appearance transforms that don't affect pixel positions.
+    # CRITICAL: If geometric transforms push keypoints outside image bounds,
+    # Albumentations will drop them. The _apply_transforms() method detects this
+    # and raises ImageNotFoundError, triggering EpisodicDataset's retry logic.
     # ========================================================================
     
     # Build transforms with augmentation for training
     if image_set == 'train':
-        # Training: APPEARANCE-ONLY augmentation
         import albumentations as A
         transforms = A.Compose([
+            # ================================================================
+            # GEOMETRIC AUGMENTATION
+            # Albumentations automatically updates keypoint coordinates
+            # ================================================================
+            A.Affine(
+                translate_percent={"x": (-0.1, 0.1), "y": (-0.1, 0.1)},  # ±10% shift
+                scale=(0.85, 1.15),    # ±15% scale
+                rotate=(-30, 30),      # ±30° rotation
+                border_mode=0,         # cv2.BORDER_CONSTANT (pad with zeros)
+                fill=0,                # Black padding for out-of-bounds regions
+                p=0.7                  # Apply 70% of the time
+            ),
+            
+            # Horizontal flip (most pose datasets have left-right symmetry)
+            A.HorizontalFlip(p=0.5),
+            
+            # ================================================================
+            # APPEARANCE AUGMENTATION
+            # ================================================================
             # Color jitter: Vary brightness, contrast, saturation, hue
-            # This helps model generalize across different lighting conditions
             A.ColorJitter(
-                brightness=0.2,  # ±20% brightness variation
-                contrast=0.2,    # ±20% contrast variation
-                saturation=0.2,  # ±20% saturation variation
-                hue=0.05,        # ±5% hue shift (small to avoid unrealistic colors)
-                p=0.6            # Apply 60% of the time
+                brightness=0.3,        # ±30% brightness variation (increased)
+                contrast=0.3,          # ±30% contrast variation (increased)
+                saturation=0.3,        # ±30% saturation variation (increased)
+                hue=0.1,               # ±10% hue shift (increased)
+                p=0.6                  # Apply 60% of the time
             ),
             
-            # Gaussian noise: Add small random noise to image
-            # Helps model be robust to sensor noise and compression artifacts
-            A.GaussNoise(
-                var_limit=(5.0, 25.0),  # Low variance to avoid corrupting image
-                mean=0,                   # Zero-mean noise
-                p=0.4                     # Apply 40% of the time
-            ),
-            
-            # Gaussian blur: Slight blur to simulate focus variations
-            # Helps with images that may be slightly out of focus
-            A.GaussianBlur(
-                blur_limit=(3, 5),  # Small kernel size (3x3 or 5x5)
-                sigma_limit=0,      # Auto-select sigma based on kernel
-                p=0.2               # Apply 20% of the time (less frequent)
-            ),
+            # Random noise or blur (one of them, not both)
+            A.OneOf([
+                A.GaussNoise(p=1.0),
+                A.GaussianBlur(blur_limit=(3, 7), p=1.0),
+                A.MotionBlur(blur_limit=5, p=1.0),
+            ], p=0.3),
             
             # Final deterministic resize to 512x512
             # This is NOT augmentation - it's required normalization
             A.Resize(height=512, width=512),
+            
         ], keypoint_params=A.KeypointParams(format='xy', remove_invisible=False))
     else:
         # Validation/Test: ONLY deterministic resize (no augmentation)

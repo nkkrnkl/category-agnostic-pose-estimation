@@ -113,7 +113,14 @@ def train_one_epoch_episodic(model: torch.nn.Module, criterion: torch.nn.Module,
         # Shapes (where B=num_episodes, K=queries_per_episode):
         #   - All tensors have first dimension (B*K) for proper alignment
         # ========================================================================
-        support_images = batch['support_images'].to(device)  # (B*K, C, H, W) - repeated!
+        # PERFORMANCE OPTIMIZATION: support_images may be None during training
+        # ========================================================================
+        # When load_support_images=False, support_images is None to save I/O.
+        # The model only uses support_coords, not support images.
+        # ========================================================================
+        support_images = batch.get('support_images')
+        if support_images is not None:
+            support_images = support_images.to(device)  # (B*K, C, H, W) - only if needed
         support_coords = batch['support_coords'].to(device)  # (B*K, N, 2) - repeated!
         support_masks = batch['support_masks'].to(device)    # (B*K, N) - repeated!
         query_images = batch['query_images'].to(device)      # (B*K, C, H, W)
@@ -448,8 +455,11 @@ def evaluate_cape(model, criterion, data_loader, device, compute_pck=True, pck_t
         # NOTE: After episodic_collate_fn fix #1, all tensors have matching
         # batch size (B*K) where each support is repeated K times to align
         # with its corresponding queries.
+        # PERFORMANCE: support_images may be None during training (not used by model)
         # ========================================================================
-        support_images = batch['support_images'].to(device)  # (B*K, C, H, W)
+        support_images = batch.get('support_images')
+        if support_images is not None:
+            support_images = support_images.to(device)  # (B*K, C, H, W) - only if needed
         support_coords = batch['support_coords'].to(device)  # (B*K, N, 2)
         support_masks = batch['support_masks'].to(device)    # (B*K, N)
         query_images = batch['query_images'].to(device)      # (B*K, C, H, W)
@@ -927,8 +937,11 @@ def evaluate_unseen_categories(
         # Move batch to device
         # ========================================================================
         # NOTE: All tensors have matching batch size (B*K) after collate_fn fix
+        # PERFORMANCE: support_images may be None during training (not used by model)
         # ========================================================================
-        support_images = batch['support_images'].to(device)  # (B*K, C, H, W)
+        support_images = batch.get('support_images')
+        if support_images is not None:
+            support_images = support_images.to(device)  # (B*K, C, H, W) - only if needed
         support_coords = batch['support_coords'].to(device)  # (B*K, N, 2)
         support_masks = batch['support_masks'].to(device)    # (B*K, N)
         query_images = batch['query_images'].to(device)      # (B*K, C, H, W)
