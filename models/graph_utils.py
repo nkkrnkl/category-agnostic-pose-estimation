@@ -60,6 +60,10 @@ def adj_from_skeleton(num_pts, skeleton, mask, device='cuda'):
     adj = adj_mx + trans_adj_mx * cond - adj_mx * cond
     
     # Zero out rows/columns for masked keypoints
+    # CRITICAL: Ensure mask is boolean before using ~ operator
+    if mask.dtype != torch.bool:
+        mask = mask.bool()
+    
     adj = adj * ~mask[..., None] * ~mask[:, None]
     
     # Row-normalize (each row sums to 1)

@@ -324,7 +324,22 @@ class CAPEModel(nn.Module):
         # ================================================================
         
         # 1. Encode support pose graph with skeleton structure
-        support_features = self.support_encoder(support_coords, support_mask, skeleton_edges)
+        # ========================================================================
+        # CRITICAL FIX: Handle mask convention differences between encoders
+        # ========================================================================
+        # Dataloader convention: support_mask has True = valid keypoint (visibility > 0)
+        # - Old SupportPoseGraphEncoder: expects True = valid (no conversion needed)
+        # - New GeometricSupportEncoder: expects True = invalid (needs inversion)
+        # ========================================================================
+        if self.use_geometric_encoder:
+            # GeometricSupportEncoder expects True = invalid/invisible
+            # Invert mask: True (valid) → False (valid), False (invalid) → True (invalid)
+            encoder_mask = ~support_mask
+        else:
+            # SupportPoseGraphEncoder expects True = valid (matches dataloader)
+            encoder_mask = support_mask
+        
+        support_features = self.support_encoder(support_coords, encoder_mask, skeleton_edges)
         # support_features: (B, N_support, hidden_dim)
 
         # 2. Check if base model supports CAPE mode (with built-in support handling)
