@@ -46,8 +46,7 @@ class GeometricSupportEncoder(nn.Module):
     
     Input Shapes:
         - support_coords: [bs, num_pts, 2] normalized to [0, 1]
-        - support_mask: [bs, num_pts] (True = VALID keypoint, False = invalid/padding)
-                       Convention from dataloader: True = visibility > 0
+        - support_mask: [bs, num_pts] (True = invalid/invisible keypoint)
         - skeleton_edges: List of length bs, each element is list of [i, j] edge pairs
     
     Output Shape:
@@ -149,8 +148,7 @@ class GeometricSupportEncoder(nn.Module):
         
         Args:
             support_coords (torch.Tensor): [bs, num_pts, 2] keypoint coordinates in [0, 1]
-            support_mask (torch.Tensor): [bs, num_pts] boolean mask (True = VALID keypoint, False = invalid/padding)
-                                        Convention: True = visibility > 0 (from dataloader)
+            support_mask (torch.Tensor): [bs, num_pts] boolean mask (True = invalid)
             skeleton_edges (list): List of edge lists (one per batch element)
                                   Each element is list of [i, j] pairs (0-indexed)
         
@@ -180,22 +178,12 @@ class GeometricSupportEncoder(nn.Module):
         # Without this, shuffling keypoint order produces identical embeddings.
         embeddings = self.sequence_pos_encoding(embeddings)  # [bs, num_pts, hidden_dim]
         
-        # Interpret support_mask coming from dataloader:
-        #   - Current convention (episodic_sampler): True = VALID keypoint (visibility > 0)
-        #   - PyTorch Transformer expects src_key_padding_mask: True = PAD (to ignore)
-        # Convert once here so the rest of this module can use the correct semantics.
-        # Ensure support_mask is boolean (handle float tensors like 1.0/0.0)
-        if support_mask.dtype != torch.bool:
-            valid_mask = support_mask.bool()  # Convert float/int to boolean
-        else:
-            valid_mask = support_mask        # Already boolean
-        pad_mask = ~valid_mask               # True = padding / invalid (for Transformer & GCN)
-        
         # 5. Optional GCN pre-encoding (from CapeX)
         if self.use_gcn_preenc and self.gcn_layers is not None:
             # Build adjacency matrix from skeleton
-            # adj_from_skeleton expects mask=True for INVALID / padded positions
-            adj = adj_from_skeleton(num_pts, skeleton_edges, pad_mask, device)
+            # support_mask convention: True=masked/ignore, False=valid/use
+            # adj_from_skeleton expects same convention and handles negation internally
+            adj = adj_from_skeleton(num_pts, skeleton_edges, support_mask, device)
             # adj: [bs, 2, num_pts, num_pts]
             
             # Apply GCN layers sequentially
@@ -203,24 +191,39 @@ class GeometricSupportEncoder(nn.Module):
                 embeddings = gcn_layer(embeddings, adj)  # [bs, num_pts, hidden_dim]
         
         # 6. Transformer self-attention
-        # pad_mask: True = positions to ignore (mask out)
+        # support_mask: True = positions to ignore (mask out)
         # PyTorch convention: True = ignore
-
-        # DEBUG: Inspect effective keypoints per sample to catch empty supports
-        try:
-            unmasked_counts = valid_mask.sum(dim=1)
-            print("[DEBUG GeometricSupportEncoder] support_coords shape:", tuple(support_coords.shape))
-            print("[DEBUG GeometricSupportEncoder] valid_mask shape:", tuple(valid_mask.shape))
-            print("[DEBUG GeometricSupportEncoder] unmasked (valid) keypoints per sample:",
-                  unmasked_counts.tolist())
-        except Exception:
-            # Avoid breaking training if debug logging fails for any reason
-            pass
-
-        support_features = self.transformer_encoder(
-            embeddings,
-            src_key_padding_mask=pad_mask
-        )  # [bs, num_pts, hidden_dim]
+        
+        # CRITICAL SAFETY CHECK: Handle edge case where ALL keypoints are masked
+        # This can happen with invalid data where all keypoints have visibility==0
+        # PyTorch's nested tensor conversion fails when all elements are masked
+        # Check if any batch element has all keypoints masked (all True)
+        all_masked_per_batch = support_mask.all(dim=1)  # [bs]
+        
+        if all_masked_per_batch.any():
+            # At least one batch element has all keypoints masked (invalid data)
+            # This causes nested tensor conversion to fail
+            # Workaround: temporarily unmask the first keypoint for those batches
+            temp_mask = support_mask.clone()
+            for b in range(support_mask.shape[0]):
+                if all_masked_per_batch[b]:
+                    # Unmask the first keypoint to avoid nested tensor error
+                    # (This shouldn't happen with proper data validation, but we handle it gracefully)
+                    temp_mask[b, 0] = False
+            
+            support_features = self.transformer_encoder(
+                embeddings,
+                src_key_padding_mask=temp_mask
+            )
+            
+            # Zero out features for fully-masked batches (they contain invalid data)
+            support_features[all_masked_per_batch] = 0.0
+        else:
+            # Normal case - process as usual
+            support_features = self.transformer_encoder(
+                embeddings,
+                src_key_padding_mask=support_mask
+            )  # [bs, num_pts, hidden_dim]
         
         return support_features
     
