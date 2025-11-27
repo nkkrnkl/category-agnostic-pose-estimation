@@ -25,7 +25,8 @@ def adj_from_skeleton(num_pts, skeleton, mask, device='cuda'):
     Args:
         num_pts (int): Number of keypoints
         skeleton (list): List of edge lists [[[i,j], ...], ...] (one per batch element)
-                        Edges are 0-indexed
+                        Edges can be 0-indexed or 1-indexed (auto-detected and converted)
+                        Invalid edges (out of bounds indices) are automatically filtered
         mask (torch.Tensor): Boolean mask [bs, num_pts] (True=invalid/invisible keypoint)
         device (str): Device to create tensors on ('cuda', 'cpu', 'mps')
     
@@ -48,10 +49,85 @@ def adj_from_skeleton(num_pts, skeleton, mask, device='cuda'):
     
     # Build adjacency matrix for each batch element
     for b in range(batch_size):
-        edges = torch.tensor(skeleton[b], device=device)
+        skeleton_b = skeleton[b]
         adj = torch.zeros(num_pts, num_pts, device=device)
-        if len(edges) > 0:  # Only add edges if skeleton is non-empty
-            adj[edges[:, 0], edges[:, 1]] = 1
+        
+        if skeleton_b is not None and len(skeleton_b) > 0:
+            # CRITICAL FIX: Handle both 1-indexed (COCO format) and 0-indexed edges
+            # Filter and convert edges to valid 0-indexed format
+            
+            # First pass: Find minimum index to determine if 1-indexed
+            min_idx = None
+            for edge in skeleton_b:
+                try:
+                    # Handle various edge formats: list, tuple, etc.
+                    if not isinstance(edge, (list, tuple)):
+                        continue
+                    if len(edge) != 2:
+                        continue
+                    # Convert to int (handle float indices)
+                    src_val = int(edge[0])
+                    dst_val = int(edge[1])
+                    edge_min = min(src_val, dst_val)
+                    if min_idx is None or edge_min < min_idx:
+                        min_idx = edge_min
+                except (ValueError, TypeError, IndexError):
+                    # Skip malformed edges
+                    continue
+            
+            # Convert from 1-indexed to 0-indexed if needed (COCO → PyTorch)
+            # If min_idx is None (no valid edges), default to 0-indexed assumption
+            is_1indexed = (min_idx is not None) and (min_idx >= 1)
+            
+            # Second pass: Filter and convert edges with robust validation
+            valid_edges = []
+            for edge in skeleton_b:
+                try:
+                    # Handle various edge formats
+                    if not isinstance(edge, (list, tuple)):
+                        continue
+                    if len(edge) != 2:
+                        continue
+                    
+                    # Convert to int (handle float indices from JSON)
+                    src = int(edge[0])
+                    dst = int(edge[1])
+                    
+                    # Convert from 1-indexed to 0-indexed if needed
+                    if is_1indexed:
+                        src = src - 1 if src > 0 else src
+                        dst = dst - 1 if dst > 0 else dst
+                    
+                    # Only keep edges with valid indices (in bounds)
+                    # This prevents CUDA device-side assert errors from out-of-bounds indexing
+                    # Also reject negative indices
+                    if 0 <= src < num_pts and 0 <= dst < num_pts:
+                        valid_edges.append([src, dst])
+                except (ValueError, TypeError, IndexError, OverflowError):
+                    # Skip malformed edges silently
+                    continue
+            
+            # Add valid edges to adjacency matrix
+            # Create tensor on CPU first to avoid CUDA errors during creation
+            if len(valid_edges) > 0:
+                try:
+                    # Create on CPU first, then move to device (safer for CUDA)
+                    edges_tensor = torch.tensor(valid_edges, dtype=torch.long)
+                    # Validate tensor is valid before moving to device
+                    if edges_tensor.numel() > 0:
+                        edges_tensor = edges_tensor.to(device)
+                        # Double-check bounds before indexing
+                        if (edges_tensor >= 0).all() and (edges_tensor < num_pts).all():
+                            adj[edges_tensor[:, 0], edges_tensor[:, 1]] = 1
+                except (RuntimeError, ValueError, IndexError) as e:
+                    # If tensor creation fails, skip this batch element
+                    # (better than crashing the entire training)
+                    import warnings
+                    warnings.warn(
+                        f"Failed to create adjacency matrix for batch element {b}: {e}. "
+                        f"Using empty adjacency (no skeleton edges)."
+                    )
+        
         adj_mx = torch.concatenate((adj_mx, adj.unsqueeze(0)), dim=0)
     
     # Make symmetric (undirected graph)
