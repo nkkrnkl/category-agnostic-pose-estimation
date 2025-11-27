@@ -333,6 +333,20 @@ def visualize_pose_prediction(support_image, query_image, pred_keypoints,
     # Draw predicted keypoints (red X marks)
     if pred_keypoints:
         pred_kpts_array = np.array(pred_keypoints)
+        
+        # Limit to GT count for fair comparison (if GT available)
+        # This helps identify false positive predictions
+        if gt_keypoints is not None:
+            num_gt = len(gt_keypoints)
+            num_pred = len(pred_kpts_array)
+            if num_pred > num_gt:
+                # Model predicted more keypoints than expected - show all but note the mismatch
+                if debug_coords:
+                    print(f"  ⚠️  Model predicted {num_pred} keypoints but GT has {num_gt} (extra predictions shown)")
+                # Optionally limit to GT count for cleaner visualization
+                # Uncomment the next line to only show first N predictions matching GT count
+                # pred_kpts_array = pred_kpts_array[:num_gt]
+        
         # CRITICAL FIX: Denormalize by TARGET_SIZE (512), not image dimensions
         # Coordinates are normalized relative to 512x512, regardless of actual image size
         if pred_kpts_array.max() <= 1.0:
@@ -404,7 +418,14 @@ def visualize_pose_prediction(support_image, query_image, pred_keypoints,
             abs_diff = np.abs(gt_trimmed - pred_trimmed)
             euclidean_dist = np.sqrt(np.sum(abs_diff ** 2, axis=1))
             
-            print(f"  Number of keypoints: {num_kpts}")
+            # Check for keypoint count mismatch
+            num_pred_total = len(pred_keypoints) if pred_keypoints else 0
+            num_gt_total = len(gt_keypoints) if gt_keypoints else 0
+            if num_pred_total != num_gt_total:
+                print(f"  ⚠️  Keypoint count mismatch: {num_pred_total} predicted vs {num_gt_total} GT")
+                print(f"     (PCK computed on first {num_kpts} keypoints)")
+            
+            print(f"  Number of keypoints (for comparison): {num_kpts}")
             print(f"  GT coordinates (pixels, first 5):")
             for i in range(min(5, num_kpts)):
                 print(f"    Kpt {i}: ({gt_trimmed[i,0]:.2f}, {gt_trimmed[i,1]:.2f})")
@@ -419,6 +440,13 @@ def visualize_pose_prediction(support_image, query_image, pred_keypoints,
             max_dist = np.max(euclidean_dist)
             print(f"  Mean Euclidean distance: {mean_dist:.2f} pixels")
             print(f"  Max Euclidean distance: {max_dist:.2f} pixels")
+            
+            # PCK threshold info
+            if pck_score is not None:
+                threshold_px = 0.2 * np.sqrt(TARGET_SIZE**2 + TARGET_SIZE**2)  # PCK@0.2 threshold
+                print(f"  PCK@0.2 threshold: {threshold_px:.2f} pixels")
+                num_within_threshold = (euclidean_dist < threshold_px).sum()
+                print(f"  Keypoints within threshold: {num_within_threshold}/{num_kpts} ({num_within_threshold/num_kpts:.1%})")
             
             # If PCK=1.0, we expect very small differences (< 1 pixel)
             if pck_score is not None and pck_score >= 0.99:
