@@ -177,7 +177,7 @@ class DeformableTransformer(nn.Module):
     def forward(self, srcs, masks, pos_embeds, query_embed=None, tgt=None, tgt_masks=None, 
                 seq_kwargs=None, force_simple_returns=False, 
                 return_enc_cache=False, enc_cache=None, decode_token_pos=None,
-                support_features=None):
+                support_features=None, support_mask=None):
         # assert query_embed is not None
 
         if enc_cache is None:
@@ -247,7 +247,8 @@ class DeformableTransformer(nn.Module):
                                             pre_decoder_pos_embed=self.pre_decoder_pos_embed,
                                             attn_concat_src=self.dec_attn_concat_src,
                                             decode_token_pos=decode_token_pos,
-                                            support_features=support_features)
+                                            support_features=support_features,
+                                            support_mask=support_mask)
         if return_enc_cache:
             return hs, init_reference_out, inter_references, inter_classes, enc_cache_output
         return hs, init_reference_out, inter_references, inter_classes
@@ -317,7 +318,7 @@ class TransformerDecoderLayer(nn.Module):
         return tgt
 
     def forward(self, tgt, query_pos, reference_points, src, src_spatial_shapes, level_start_index, src_padding_mask=None, 
-                tgt_masks=None, attn_concat_src=False, input_pos=None, support_features=None):
+                tgt_masks=None, attn_concat_src=False, input_pos=None, support_features=None, support_mask=None):
 
         q = self.with_pos_embed(self.attn_q(tgt), query_pos)
         # self attention
@@ -339,10 +340,19 @@ class TransformerDecoderLayer(nn.Module):
         tgt = tgt + self.dropout2(tgt2)
         tgt = self.norm2(tgt)
 
-        # NEW: Support Cross-Attention (for CAPE mode)
+        # Support Cross-Attention (for CAPE mode)
+        # ========================================================================
+        # CRITICAL FIX: Pass support_mask to prevent attending to invalid keypoints
+        # ========================================================================
+        # support_mask: (B, N) where True = invalid/ignore, False = valid
+        # PyTorch's key_padding_mask uses same convention: True = ignore
+        # ========================================================================
         if support_features is not None:
             # tgt: (B, L, D), support_features: (B, N, D)
-            tgt2_support = self.support_attn(tgt, support_features, support_features)[0]
+            tgt2_support = self.support_attn(
+                tgt, support_features, support_features,
+                key_padding_mask=support_mask
+            )[0]
             tgt = tgt + self.dropout_support(tgt2_support)
             tgt = self.norm_support(tgt)
 
@@ -1014,8 +1024,19 @@ class TransformerDecoder(nn.Module):
     def forward(self, tgt, reference_points, src, src_flatten, src_spatial_shapes, src_level_start_index, src_valid_ratios,
                 query_pos=None, src_padding_mask=None, tgt_masks=None, seq_kwargs=None, force_simple_returns=False, 
                 pre_decoder_pos_embed=False, attn_concat_src=False,
-                decode_token_pos=None, support_features=None):
+                decode_token_pos=None, support_features=None, support_mask=None):
         # print(seq_kwargs['seq11'].max(),seq_kwargs['seq21'].max(), seq_kwargs['seq12'].max(), seq_kwargs['seq22'].max())
+
+        # ========================================================================
+        # CAPE Support Features: Read from decoder attributes if not passed
+        # ========================================================================
+        # CAPEModel stores support_features and support_mask as decoder attributes
+        # when cape_mode=False. Read from them if parameters are None.
+        # ========================================================================
+        if support_features is None:
+            support_features = getattr(self, 'support_features', None)
+        if support_mask is None:
+            support_mask = getattr(self, 'support_mask', None)
 
         output = self._seq_embed(seq11=seq_kwargs['seq11'], seq12=seq_kwargs['seq12'], 
                                 seq21=seq_kwargs['seq21'], seq22=seq_kwargs['seq22'], 
@@ -1066,7 +1087,8 @@ class TransformerDecoder(nn.Module):
                            src_spatial_shapes, src_level_start_index, src_padding_mask, 
                            tgt_masks, attn_concat_src=attn_concat_src,
                            input_pos=decode_token_pos,
-                           support_features=support_features)
+                           support_features=support_features,
+                           support_mask=support_mask)
             if src_tmp is not None:
                 src = src_tmp
     

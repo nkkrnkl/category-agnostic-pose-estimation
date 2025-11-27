@@ -110,16 +110,39 @@ class SupportPoseEncoder(nn.Module):
         
         # 3. Prepare padding mask for transformer
         # Transformer expects src_key_padding_mask where True = positions to ignore (padding)
-        # Our mask is True for valid, False for padding, so we need to invert it
+        # Our mask (after episodic_sampler fix): True=masked/ignore, False=valid
+        # This already matches PyTorch's convention, so NO inversion needed
+        all_masked_per_batch = None  # Track if any batch has all keypoints masked
+        
         if support_mask is not None:
-            # Invert: True (valid) -> False (don't mask), False (padding) -> True (mask)
-            src_key_padding_mask = ~support_mask  # (B, N)
+            src_key_padding_mask = support_mask  # (B, N) - True=masked, False=valid
+            
+            # CRITICAL SAFETY CHECK: Handle edge case where ALL keypoints are masked
+            # This can happen with invalid data where all keypoints have visibility==0
+            # PyTorch's nested tensor conversion fails when all elements are masked
+            all_masked_per_batch = support_mask.all(dim=1)  # [bs]
+            
+            if all_masked_per_batch.any():
+                # At least one batch element has all keypoints masked (invalid data)
+                # This causes nested tensor conversion to fail
+                # Workaround: temporarily unmask the first keypoint for those batches
+                src_key_padding_mask = support_mask.clone()
+                for b in range(support_mask.shape[0]):
+                    if all_masked_per_batch[b]:
+                        # Unmask the first keypoint to avoid nested tensor error
+                        # (This shouldn't happen with proper data validation, but we handle it gracefully)
+                        src_key_padding_mask[b, 0] = False
         else:
             src_key_padding_mask = None
         
         # 4. Pass through Transformer with padding mask
         # Output: Es (B, N, 256)
         support_features = self.transformer_encoder(x, src_key_padding_mask=src_key_padding_mask)
+        
+        # Zero out features for fully-masked batches if any (they contain invalid data)
+        if all_masked_per_batch is not None and all_masked_per_batch.any():
+            support_features[all_masked_per_batch] = 0.0
+        
         return support_features
 
 

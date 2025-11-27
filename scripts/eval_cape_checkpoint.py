@@ -54,6 +54,38 @@ from util.eval_utils import PCKEvaluator, compute_pck_bbox
 from models.engine_cape import extract_keypoints_from_sequence
 
 
+def load_category_names(dataset_root: Path, category_split_file: str = 'category_splits.json') -> Dict[int, str]:
+    """
+    Load category ID to name mapping from category_splits.json.
+    
+    Args:
+        dataset_root: Root directory of dataset
+        category_split_file: Name of category splits JSON file
+        
+    Returns:
+        Dict mapping category ID to category name
+    """
+    split_file = dataset_root / category_split_file
+    if not split_file.exists():
+        print(f"⚠️  Warning: Category splits file not found: {split_file}")
+        return {}
+    
+    with open(split_file, 'r') as f:
+        splits = json.load(f)
+    
+    # Build ID -> name mapping for all splits
+    cat_id_to_name = {}
+    
+    for split_name in ['train', 'val', 'test']:
+        ids = splits.get(split_name, [])
+        names = splits.get(f'{split_name}_names', [])
+        
+        for cat_id, cat_name in zip(ids, names):
+            cat_id_to_name[cat_id] = cat_name
+    
+    return cat_id_to_name
+
+
 def get_args_parser():
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
@@ -92,6 +124,12 @@ def get_args_parser():
     # Output arguments
     parser.add_argument('--output-dir', default='outputs/cape_eval', type=str,
                        help='Directory to save metrics and visualizations')
+    
+    # Per-category breakdown options
+    parser.add_argument('--show-per-category', action='store_true', default=True,
+                       help='Show detailed per-category PCK breakdown with names')
+    parser.add_argument('--sort-by-pck', choices=['asc', 'desc', 'id'], default='desc',
+                       help='Sort per-category results: asc (worst first), desc (best first), id (by category ID)')
     
     # Device arguments
     parser.add_argument('--device', default=None, type=str,
@@ -259,7 +297,10 @@ def build_dataloader(args: argparse.Namespace, split: str, num_workers: int,
 
 
 def run_evaluation(model: nn.Module, dataloader: DataLoader, device: torch.device,
-                   pck_threshold: float = 0.2) -> Dict:
+                   pck_threshold: float = 0.2,
+                   category_names: Dict[int, str] = None,
+                   show_per_category: bool = True,
+                   sort_by_pck: str = 'desc') -> Dict:
     """
     Run evaluation on the dataloader and compute metrics.
     
@@ -268,6 +309,9 @@ def run_evaluation(model: nn.Module, dataloader: DataLoader, device: torch.devic
         dataloader: Episodic dataloader
         device: Device to run on
         pck_threshold: PCK threshold
+        category_names: Dict mapping category ID to name (optional)
+        show_per_category: Whether to show detailed per-category breakdown
+        sort_by_pck: Sort order for per-category results ('asc', 'desc', 'id')
         
     Returns:
         metrics: Dictionary with evaluation metrics
@@ -592,18 +636,64 @@ def run_evaluation(model: nn.Module, dataloader: DataLoader, device: torch.devic
             print()
     
     # Per-category results
-    if 'per_category' in results and len(results['per_category']) > 0:
-        print("Per-Category PCK:")
-        print(f"  {'Category ID':<15} {'PCK':<10} {'Correct/Total':<15}")
-        print(f"  {'-'*15} {'-'*10} {'-'*15}")
+    if show_per_category and 'per_category' in results and len(results['per_category']) > 0:
+        print("=" * 80)
+        print("PER-CATEGORY PCK BREAKDOWN")
+        print("=" * 80)
+        print()
         
-        # Sort by category ID
-        cat_results = sorted(results['per_category'].items(), key=lambda x: x[0])
+        # Determine sorting
+        if sort_by_pck == 'desc':
+            cat_results = sorted(results['per_category'].items(), 
+                               key=lambda x: x[1]['pck'], reverse=True)
+            print(f"Sorted by PCK (best → worst):")
+        elif sort_by_pck == 'asc':
+            cat_results = sorted(results['per_category'].items(), 
+                               key=lambda x: x[1]['pck'], reverse=False)
+            print(f"Sorted by PCK (worst → best):")
+        else:  # 'id'
+            cat_results = sorted(results['per_category'].items(), 
+                               key=lambda x: int(x[0]))
+            print(f"Sorted by Category ID:")
+        print()
+        
+        # Table header
+        if category_names:
+            print(f"  {'ID':<6} {'Category Name':<25} {'PCK':<12} {'Correct/Total':<15}")
+            print(f"  {'-'*6} {'-'*25} {'-'*12} {'-'*15}")
+        else:
+            print(f"  {'Category ID':<15} {'PCK':<12} {'Correct/Total':<15}")
+            print(f"  {'-'*15} {'-'*12} {'-'*15}")
+        
+        # Table rows
         for cat_id, cat_metrics in cat_results:
             pck = cat_metrics['pck']
             correct = cat_metrics['correct']
             total = cat_metrics['total']
-            print(f"  {cat_id:<15} {pck:<10.4f} {correct}/{total:<15}")
+            pck_str = f"{pck:.2%}"
+            ratio_str = f"{correct}/{total}"
+            
+            if category_names:
+                cat_name = category_names.get(int(cat_id), f"cat_{cat_id}")
+                # Truncate long names
+                if len(cat_name) > 24:
+                    cat_name = cat_name[:21] + "..."
+                print(f"  {cat_id:<6} {cat_name:<25} {pck_str:<12} {ratio_str:<15}")
+            else:
+                print(f"  {cat_id:<15} {pck_str:<12} {ratio_str:<15}")
+        
+        print()
+        
+        # Summary statistics
+        pcks = [m['pck'] for m in results['per_category'].values()]
+        print(f"  Summary:")
+        print(f"    Categories evaluated: {len(pcks)}")
+        print(f"    Mean PCK: {np.mean(pcks):.2%}")
+        print(f"    Std PCK: {np.std(pcks):.2%}")
+        print(f"    Min PCK: {np.min(pcks):.2%}")
+        print(f"    Max PCK: {np.max(pcks):.2%}")
+    elif not show_per_category:
+        print("  (Per-category breakdown disabled, use --show-per-category to enable)")
     else:
         print("  (No per-category breakdown available)")
     
@@ -786,7 +876,9 @@ def create_visualization(pred_dict: Dict, output_path: Path,
     support_mask = pred_dict['support_masks'][0].cpu().numpy()  # (N,)
     
     # Filter valid support keypoints
-    valid_support_mask = support_mask > 0.5
+    # CRITICAL: Mask convention is True=masked/invalid, False=valid
+    # So we want keypoints where mask is FALSE (valid)
+    valid_support_mask = ~support_mask.astype(bool)  # Invert: True = valid
     support_kpts_valid = support_coords_norm[valid_support_mask]
     
     # Get support bbox dimensions (ORIGINAL, for PCK only - not used here)
@@ -999,6 +1091,16 @@ def main():
     if args.dataset_root is not None:
         checkpoint_args.dataset_root = args.dataset_root
     
+    # Load category names for per-category breakdown
+    category_names = {}
+    if args.show_per_category:
+        dataset_root = Path(checkpoint_args.dataset_root)
+        category_split_file = getattr(checkpoint_args, 'category_split_file', 'category_splits.json')
+        category_names = load_category_names(dataset_root, category_split_file)
+        if category_names:
+            print(f"✓ Loaded {len(category_names)} category names")
+        print()
+    
     # Build dataloader
     dataloader = build_dataloader(
         checkpoint_args,
@@ -1012,7 +1114,10 @@ def main():
     # Run evaluation
     metrics, predictions_list = run_evaluation(
         model, dataloader, device,
-        pck_threshold=args.pck_threshold
+        pck_threshold=args.pck_threshold,
+        category_names=category_names,
+        show_per_category=args.show_per_category,
+        sort_by_pck=args.sort_by_pck
     )
     
     # Add metadata to metrics
@@ -1094,12 +1199,16 @@ def main():
         
         print("Top 5 performing categories:")
         for cat_id, pck in cat_pcks_sorted[:5]:
-            print(f"  cat_id={cat_id}: {pck:.2%}")
+            cat_name = category_names.get(int(cat_id), "") if category_names else ""
+            name_str = f" ({cat_name})" if cat_name else ""
+            print(f"  cat_id={cat_id}{name_str}: {pck:.2%}")
         
         print()
         print("Bottom 5 performing categories:")
         for cat_id, pck in cat_pcks_sorted[-5:]:
-            print(f"  cat_id={cat_id}: {pck:.2%}")
+            cat_name = category_names.get(int(cat_id), "") if category_names else ""
+            name_str = f" ({cat_name})" if cat_name else ""
+            print(f"  cat_id={cat_id}{name_str}: {pck:.2%}")
         print()
     
     print(f"Visualizations saved to: {vis_dir}")

@@ -75,10 +75,16 @@ class CAPEModel(nn.Module):
                 dropout=0.1
             )
 
-        # Support fusion layer (injected into decoder)
+        # Support fusion layer
+        # ========================================================================
+        # NOTE: For 'cross_attention' fusion, the decoder already has built-in
+        # support_attn layers (MultiheadAttention) in each TransformerDecoderLayer.
+        # No additional layers need to be created here - the support_features are
+        # passed to the decoder which uses its built-in cross-attention.
+        # ========================================================================
         if support_fusion_method == 'cross_attention':
-            # Will add cross-attention modules to decoder layers
-            self._add_support_cross_attention()
+            # Decoder's built-in support_attn handles this - no extra layers needed
+            pass
         elif support_fusion_method == 'concat':
             # Projection for concatenated features
             self.support_proj = nn.Linear(hidden_dim * 2, hidden_dim)
@@ -87,34 +93,6 @@ class CAPEModel(nn.Module):
             pass
         else:
             raise ValueError(f"Unknown fusion method: {support_fusion_method}")
-
-    def _add_support_cross_attention(self):
-        """
-        Add support cross-attention modules to decoder layers.
-
-        This creates cross-attention layers that allow the decoder to attend
-        to support graph embeddings when generating query keypoints.
-        """
-        # Get decoder layers from base model
-        decoder = self.base_model.transformer.decoder
-        num_layers = decoder.num_layers
-
-        # Create support cross-attention modules for each decoder layer
-        self.support_cross_attention_layers = nn.ModuleList([
-            nn.MultiheadAttention(
-                embed_dim=self.hidden_dim,
-                num_heads=8,
-                dropout=0.1,
-                batch_first=True
-            )
-            for _ in range(num_layers)
-        ])
-
-        # Layer norms for support cross-attention
-        self.support_attn_layer_norms = nn.ModuleList([
-            nn.LayerNorm(self.hidden_dim)
-            for _ in range(num_layers)
-        ])
 
     def forward(self, samples, support_coords, support_mask, targets=None, skeleton_edges=None):
         """
@@ -214,14 +192,10 @@ class CAPEModel(nn.Module):
         # We need to inject support features into the decoder
 
         # Store support features for use in decoder
+        # The decoder reads these attributes when support_features/support_mask
+        # are not passed as parameters (which happens when cape_mode=False)
         self.base_model.transformer.decoder.support_features = support_features
         self.base_model.transformer.decoder.support_mask = support_mask
-        self.base_model.transformer.decoder.support_cross_attn_layers = getattr(
-            self, 'support_cross_attention_layers', None
-        )
-        self.base_model.transformer.decoder.support_attn_norms = getattr(
-            self, 'support_attn_layer_norms', None
-        )
 
         # Forward through base model
         # If base model has cape_mode, pass support_graphs directly
@@ -234,11 +208,9 @@ class CAPEModel(nn.Module):
             outputs = self.base_model(samples, seq_kwargs=targets)
 
         # Clean up stored references
-        # CRITICAL: Must clean up ALL temporary attributes to avoid state_dict contamination
+        # CRITICAL: Must clean up temporary attributes to avoid state_dict contamination
         self.base_model.transformer.decoder.support_features = None
         self.base_model.transformer.decoder.support_mask = None
-        self.base_model.transformer.decoder.support_cross_attn_layers = None
-        self.base_model.transformer.decoder.support_attn_norms = None
 
         return outputs
 
@@ -329,12 +301,6 @@ class CAPEModel(nn.Module):
             # Inject support features into decoder so it can cross-attend during generation
             self.base_model.transformer.decoder.support_features = support_features
             self.base_model.transformer.decoder.support_mask = support_mask
-            self.base_model.transformer.decoder.support_cross_attn_layers = getattr(
-                self, 'support_cross_attention_layers', None
-            )
-            self.base_model.transformer.decoder.support_attn_norms = getattr(
-                self, 'support_attn_layer_norms', None
-            )
 
             # Call base model's autoregressive generation method
             with torch.no_grad():
@@ -344,11 +310,9 @@ class CAPEModel(nn.Module):
                 )
 
             # Clean up decoder attributes after generation
-            # CRITICAL: Must clean up ALL temporary attributes to avoid state_dict contamination
+            # CRITICAL: Must clean up temporary attributes to avoid state_dict contamination
             self.base_model.transformer.decoder.support_features = None
             self.base_model.transformer.decoder.support_mask = None
-            self.base_model.transformer.decoder.support_cross_attn_layers = None
-            self.base_model.transformer.decoder.support_attn_norms = None
 
         # 3. Extract predictions from autoregressive outputs
         # The base model's forward_inference returns:
