@@ -26,23 +26,25 @@ class EpisodicSampler:
 
     Each episode:
     1. Sample a category c from training categories
-    2. Sample 1 support image (provides pose graph)
-    3. Sample K query images (predict keypoints using support graph)
+    2. Sample N support images (provides pose graphs) - N-shot learning
+    3. Sample K query images (predict keypoints using support graphs)
     """
 
     def __init__(self, dataset, category_split_file, split='train',
-                 num_queries_per_episode=2, seed=None):
+                 num_queries_per_episode=2, num_support_per_episode=1, seed=None):
         """
         Args:
             dataset: MP100CAPE dataset instance
             category_split_file: Path to category_splits.json
             split: 'train', 'val', or 'test' (determines which categories to use)
             num_queries_per_episode: Number of query images per episode
+            num_support_per_episode: Number of support images per episode (1-shot, 5-shot, etc.)
             seed: Random seed for reproducibility
         """
         self.dataset = dataset
         self.split = split
         self.num_queries = num_queries_per_episode
+        self.num_support = num_support_per_episode
 
         if seed is not None:
             random.seed(seed)
@@ -80,7 +82,7 @@ class EpisodicSampler:
                 continue
 
         # Filter out categories with too few examples
-        min_examples = num_queries_per_episode + 1  # Need at least support + queries
+        min_examples = num_queries_per_episode + num_support_per_episode  # Need at least N support + K queries
         self.categories = [
             cat for cat in self.categories
             if len(self.category_to_indices[cat]) >= min_examples
@@ -97,7 +99,7 @@ class EpisodicSampler:
         Returns:
             episode: dict containing:
                 - category_id: sampled category
-                - support_idx: index of support image in dataset
+                - support_indices: list of support image indices (N-shot)
                 - query_indices: list of query image indices
         """
         # Sample a category
@@ -107,14 +109,14 @@ class EpisodicSampler:
         indices = self.category_to_indices[category_id]
 
         # Sample support + query indices (without replacement)
-        sampled_indices = random.sample(indices, self.num_queries + 1)
+        sampled_indices = random.sample(indices, self.num_queries + self.num_support)
 
-        support_idx = sampled_indices[0]
-        query_indices = sampled_indices[1:]
+        support_indices = sampled_indices[:self.num_support]
+        query_indices = sampled_indices[self.num_support:]
 
         return {
             'category_id': category_id,
-            'support_idx': support_idx,
+            'support_indices': support_indices,
             'query_indices': query_indices
         }
 
@@ -138,7 +140,7 @@ class EpisodicDataset(data.Dataset):
     """
 
     def __init__(self, base_dataset, category_split_file, split='train',
-                 num_queries_per_episode=2, episodes_per_epoch=1000, seed=None,
+                 num_queries_per_episode=2, num_support_per_episode=1, episodes_per_epoch=1000, seed=None,
                  debug_single_image=None, debug_single_image_category=None):
         """
         Args:
@@ -146,6 +148,7 @@ class EpisodicDataset(data.Dataset):
             category_split_file: Path to category_splits.json
             split: 'train', 'val', or 'test'
             num_queries_per_episode: Number of query images per episode
+            num_support_per_episode: Number of support images per episode (1-shot, 5-shot, etc.)
             episodes_per_epoch: Number of episodes per training epoch
             seed: Random seed
             debug_single_image: Optional image index for single-image debug mode
@@ -153,6 +156,7 @@ class EpisodicDataset(data.Dataset):
         """
         self.base_dataset = base_dataset
         self.episodes_per_epoch = episodes_per_epoch
+        self.num_support = num_support_per_episode
         
         # Single-image debug mode
         self.debug_single_image = debug_single_image
@@ -170,10 +174,12 @@ class EpisodicDataset(data.Dataset):
                 category_split_file,
                 split=split,
                 num_queries_per_episode=num_queries_per_episode,
+                num_support_per_episode=num_support_per_episode,
                 seed=seed
             )
 
         print(f"EpisodicDataset: {episodes_per_epoch} episodes/epoch, "
+              f"{num_support_per_episode}-shot ({num_support_per_episode} support), "
               f"{num_queries_per_episode} queries/episode")
 
     def __len__(self):
@@ -270,70 +276,84 @@ class EpisodicDataset(data.Dataset):
                 # Sample episode
                 episode = self.sampler.sample_episode()
 
-                # Load support image
-                support_data = self.base_dataset[episode['support_idx']]
-
-                # Extract support pose graph (normalized coordinates)
-                support_coords = torch.tensor(support_data['keypoints'], dtype=torch.float32)
-
-                # ================================================================
-                # Normalize support coordinates to [0, 1]
-                # ================================================================
-                # Pipeline of transformations (from mp100_cape.py):
-                #   1. Keypoints made bbox-relative (subtract bbox_x, bbox_y)
-                #   2. Image cropped to bbox and resized to 512x512
-                #   3. Keypoints scaled proportionally: kpt × (512 / bbox_dim)
-                #   4. Here: Normalize by 512 to get [0, 1]
-                #
-                # Mathematical equivalence:
-                #   (kpt × 512/bbox_dim) / 512 = kpt / bbox_dim
-                #
-                # Result: Keypoints are normalized relative to original bbox dimensions,
-                # which provides scale and translation invariance for 1-shot learning.
-                # ================================================================
-                h, w = support_data['height'], support_data['width']  # Both are 512 after resize
-                support_coords[:, 0] /= w  # Normalize x to [0, 1]
-                support_coords[:, 1] /= h  # Normalize y to [0, 1]
-
-                # ================================================================
-                # CRITICAL FIX: Create support mask based on visibility
-                # ================================================================
-                # Previously: support_mask was all True (ignoring visibility)
-                # Now: Use visibility information to mark only visible keypoints as valid
-                #
-                # Visibility values (COCO format):
-                #   0 = not labeled (keypoint outside image or not annotated)
-                #   1 = labeled but not visible (occluded)
-                #   2 = labeled and visible
-                #
-                # For support mask:
-                #   - True (valid) if visibility > 0 (labeled, may be occluded)
-                #   - False (invalid) if visibility == 0 (not labeled)
-                # ================================================================
+                # Load support images (N-shot: multiple support images)
+                support_data_list = []
+                support_coords_list = []
+                support_masks_list = []
+                support_skeletons_list = []
                 
-                # Ensure visibility is present
-                if 'visibility' not in support_data:
-                    raise KeyError(
-                        f"Support data for image {support_data.get('image_id', 'unknown')} "
-                        f"is missing 'visibility' field."
+                for support_idx in episode['support_indices']:
+                    support_data = self.base_dataset[support_idx]
+                    support_data_list.append(support_data)
+                    
+                    # Extract support pose graph (normalized coordinates)
+                    support_coords = torch.tensor(support_data['keypoints'], dtype=torch.float32)
+
+                    # ================================================================
+                    # Normalize support coordinates to [0, 1]
+                    # ================================================================
+                    # Pipeline of transformations (from mp100_cape.py):
+                    #   1. Keypoints made bbox-relative (subtract bbox_x, bbox_y)
+                    #   2. Image cropped to bbox and resized to 512x512
+                    #   3. Keypoints scaled proportionally: kpt × (512 / bbox_dim)
+                    #   4. Here: Normalize by 512 to get [0, 1]
+                    #
+                    # Mathematical equivalence:
+                    #   (kpt × 512/bbox_dim) / 512 = kpt / bbox_dim
+                    #
+                    # Result: Keypoints are normalized relative to original bbox dimensions,
+                    # which provides scale and translation invariance for N-shot learning.
+                    # ================================================================
+                    h, w = support_data['height'], support_data['width']  # Both are 512 after resize
+                    support_coords[:, 0] /= w  # Normalize x to [0, 1]
+                    support_coords[:, 1] /= h  # Normalize y to [0, 1]
+
+                    # ================================================================
+                    # CRITICAL FIX: Create support mask based on visibility
+                    # ================================================================
+                    # Previously: support_mask was all True (ignoring visibility)
+                    # Now: Use visibility information to mark only visible keypoints as valid
+                    #
+                    # Visibility values (COCO format):
+                    #   0 = not labeled (keypoint outside image or not annotated)
+                    #   1 = labeled but not visible (occluded)
+                    #   2 = labeled and visible
+                    #
+                    # For support mask:
+                    #   - True (valid) if visibility > 0 (labeled, may be occluded)
+                    #   - False (invalid) if visibility == 0 (not labeled)
+                    # ================================================================
+                    
+                    # Ensure visibility is present
+                    if 'visibility' not in support_data:
+                        raise KeyError(
+                            f"Support data for image {support_data.get('image_id', 'unknown')} "
+                            f"is missing 'visibility' field."
+                        )
+                    
+                    support_visibility = support_data['visibility']
+                    
+                    # Verify length matches keypoints
+                    if len(support_visibility) != len(support_coords):
+                        raise ValueError(
+                            f"Support visibility length ({len(support_visibility)}) doesn't match "
+                            f"keypoints length ({len(support_coords)}) for image {support_data.get('image_id', 'unknown')}"
+                        )
+                    
+                    support_mask = torch.tensor(
+                        [v > 0 for v in support_visibility], 
+                        dtype=torch.bool
                     )
-                
-                support_visibility = support_data['visibility']
-                
-                # Verify length matches keypoints
-                if len(support_visibility) != len(support_coords):
-                    raise ValueError(
-                        f"Support visibility length ({len(support_visibility)}) doesn't match "
-                        f"keypoints length ({len(support_coords)}) for image {support_data.get('image_id', 'unknown')}"
-                    )
-                
-                support_mask = torch.tensor(
-                    [v > 0 for v in support_visibility], 
-                    dtype=torch.bool
-                )
 
-                # Extract skeleton edges for support pose graph
-                support_skeleton = support_data.get('skeleton', [])
+                    # Extract skeleton edges for support pose graph
+                    support_skeleton = support_data.get('skeleton', [])
+                    
+                    support_coords_list.append(support_coords)
+                    support_masks_list.append(support_mask)
+                    support_skeletons_list.append(support_skeleton)
+                
+                # For N-shot: Use first support for metadata (or aggregate if needed)
+                first_support = support_data_list[0]
 
                 # Load query images
                 query_images = []
@@ -405,19 +425,19 @@ class EpisodicDataset(data.Dataset):
                     # ================================================================
 
                 # Successfully loaded all images - return the episode
+                # For N-shot: Return lists of support data
+                support_images = [sd['image'] for sd in support_data_list]
+                
                 return {
-                    'support_image': support_data['image'],
-                    'support_coords': support_coords,
-                    'support_mask': support_mask,
-                    'support_skeleton': support_skeleton,
-                    'support_bbox': support_data.get('bbox', [0, 0, support_data['width'], support_data['height']]),
-                    'support_bbox_width': support_data.get('bbox_width', support_data['width']),
-                    'support_bbox_height': support_data.get('bbox_height', support_data['height']),
+                    'support_images': support_images,  # List of N support images
+                    'support_coords': support_coords_list,  # List of N support coordinate tensors
+                    'support_masks': support_masks_list,  # List of N support masks
+                    'support_skeletons': support_skeletons_list,  # List of N skeleton edge lists
                     'support_metadata': {
-                        'image_id': support_data['image_id'],
-                        'category_id': support_data['category_id'],
-                        'bbox_width': support_data.get('bbox_width', support_data['width']),
-                        'bbox_height': support_data.get('bbox_height', support_data['height']),
+                        'image_id': first_support['image_id'],
+                        'category_id': first_support['category_id'],
+                        'bbox_width': first_support.get('bbox_width', first_support['width']),
+                        'bbox_height': first_support.get('bbox_height', first_support['height']),
                     },
                     'query_images': query_images,
                     'query_targets': query_targets,
@@ -450,36 +470,44 @@ def episodic_collate_fn(batch):
     # Each batch contains multiple episodes
     # We need to handle variable number of keypoints per category
 
-    support_images = []
-    support_coords_list = []
-    support_masks = []
-    support_skeletons = []
+    support_images_all = []  # List of all support images (B*N)
+    support_coords_all = []  # List of all support coordinates (B*N)
+    support_masks_all = []  # List of all support masks (B*N)
+    support_skeletons_all = []  # List of all skeletons (B*N)
     support_metadata_list = []  # NEW: Collect support metadata for debugging
     query_images_list = []
     query_targets_list = []
     query_metadata_list = []  # NEW: Collect query metadata
     category_ids = []
 
+    # Determine number of support images per episode (N)
+    num_support_per_episode = len(batch[0]['support_images']) if len(batch) > 0 else 1
+
     for episode in batch:
-        support_images.append(episode['support_image'])
-        support_coords_list.append(episode['support_coords'])
-        support_masks.append(episode['support_mask'])
-        support_skeletons.append(episode['support_skeleton'])
-        support_metadata_list.append(episode.get('support_metadata', {}))  # NEW: Extract support metadata
+        # For N-shot: Each episode has N support images
+        support_images_all.extend(episode['support_images'])  # Add N support images
+        support_coords_all.extend(episode['support_coords'])  # Add N coordinate tensors
+        support_masks_all.extend(episode['support_masks'])  # Add N masks
+        support_skeletons_all.extend(episode['support_skeletons'])  # Add N skeletons
+        
+        # Repeat metadata N times (once per support)
+        for _ in range(num_support_per_episode):
+            support_metadata_list.append(episode.get('support_metadata', {}))
+        
         query_images_list.extend(episode['query_images'])
         query_targets_list.extend(episode['query_targets'])
-        query_metadata_list.extend(episode['query_metadata'])  # NEW: Extract query metadata
+        query_metadata_list.extend(episode['query_metadata'])
         category_ids.append(episode['category_id'])
 
-    # Stack support images
-    support_images = torch.stack(support_images)  # (B, C, H, W)
+    # Stack support images: (B*N, C, H, W) where N = num_support_per_episode
+    support_images = torch.stack(support_images_all)  # (B*N, C, H, W)
 
     # Pad support coordinates to max length in batch
-    max_support_kpts = max(coords.shape[0] for coords in support_coords_list)
+    max_support_kpts = max(coords.shape[0] for coords in support_coords_all)
     support_coords_padded = []
     support_masks_padded = []
 
-    for coords, mask in zip(support_coords_list, support_masks):
+    for coords, mask in zip(support_coords_all, support_masks_all):
         num_kpts = coords.shape[0]
         if num_kpts < max_support_kpts:
             # Pad
@@ -490,8 +518,8 @@ def episodic_collate_fn(batch):
         support_coords_padded.append(coords)
         support_masks_padded.append(mask)
 
-    support_coords = torch.stack(support_coords_padded)  # (B, max_kpts, 2)
-    support_masks = torch.stack(support_masks_padded)  # (B, max_kpts)
+    support_coords = torch.stack(support_coords_padded)  # (B*N, max_kpts, 2)
+    support_masks = torch.stack(support_masks_padded)  # (B*N, max_kpts)
 
     # Stack query images
     query_images = torch.stack(query_images_list)  # (B*K, C, H, W)
@@ -502,20 +530,17 @@ def episodic_collate_fn(batch):
         batched_seq_data[key] = torch.stack([qt[key] for qt in query_targets_list])
 
     # ========================================================================
-    # CRITICAL FIX: Align support and query dimensions for 1-shot learning
+    # CRITICAL FIX: Align support and query dimensions for N-shot learning
     # ========================================================================
     # Currently we have:
-    #   - support_coords:  (B, max_kpts, 2)  where B = number of episodes
-    #   - query_images:    (B*K, C, H, W)    where K = queries per episode
+    #   - support_coords:  (B*N, max_kpts, 2)  where N = num_support_per_episode
+    #   - query_images:    (B*K, C, H, W)      where K = queries per episode
     # 
-    # Problem: The model cannot tell which support goes with which query
-    # because support is per-episode but queries are flattened across episodes.
+    # For N-shot learning, we need to aggregate N support images per episode.
+    # Strategy: Group supports by episode, then repeat aggregated support K times.
     #
-    # Solution: Repeat each support K times (once per query in that episode)
-    # so that support_coords[i] corresponds to query_images[i].
-    #
-    # After this fix:
-    #   - support_coords:  (B*K, max_kpts, 2)
+    # After aggregation and alignment:
+    #   - support_coords:  (B*K, max_kpts, 2)  - aggregated N supports, repeated K times
     #   - query_images:    (B*K, C, H, W)
     # Now index i of support matches index i of query ✓
     # ========================================================================
@@ -525,16 +550,36 @@ def episodic_collate_fn(batch):
     num_total_queries = len(query_images_list)  # B*K
     queries_per_episode = num_total_queries // num_episodes  # K
     
-    # Repeat each support K times using torch.repeat_interleave
-    # repeat_interleave(tensor, repeats, dim=0) repeats each element along dim 0
-    # Example: [A, B] with repeats=2 → [A, A, B, B]
-    support_coords = support_coords.repeat_interleave(queries_per_episode, dim=0)  # (B*K, max_kpts, 2)
-    support_masks = support_masks.repeat_interleave(queries_per_episode, dim=0)  # (B*K, max_kpts)
-    support_images = support_images.repeat_interleave(queries_per_episode, dim=0)  # (B*K, C, H, W)
+    # For N-shot: Aggregate N support images per episode
+    # Strategy: Mean pooling of support coordinates (simple aggregation)
+    # Reshape: (B*N, max_kpts, 2) -> (B, N, max_kpts, 2) -> (B, max_kpts, 2) via mean
+    support_coords_reshaped = support_coords.view(num_episodes, num_support_per_episode, max_support_kpts, 2)
+    support_coords_aggregated = support_coords_reshaped.mean(dim=1)  # (B, max_kpts, 2) - mean over N supports
+    
+    support_masks_reshaped = support_masks.view(num_episodes, num_support_per_episode, max_support_kpts)
+    # For masks: Use OR (any valid keypoint across N supports is valid)
+    support_masks_aggregated = support_masks_reshaped.any(dim=1)  # (B, max_kpts) - OR over N supports
+    
+    # For images: Use first support image (or could average, but mean pooling features is better)
+    support_images_reshaped = support_images.view(num_episodes, num_support_per_episode, *support_images.shape[1:])
+    support_images_aggregated = support_images_reshaped[:, 0]  # (B, C, H, W) - use first support image
+    
+    # Repeat aggregated support K times (once per query in that episode)
+    support_coords = support_coords_aggregated.repeat_interleave(queries_per_episode, dim=0)  # (B*K, max_kpts, 2)
+    support_masks = support_masks_aggregated.repeat_interleave(queries_per_episode, dim=0)  # (B*K, max_kpts)
+    support_images = support_images_aggregated.repeat_interleave(queries_per_episode, dim=0)  # (B*K, C, H, W)
+    
+    # Aggregate skeletons: Use first support's skeleton (or could merge, but first is simpler)
+    support_skeletons_aggregated = []
+    for i in range(num_episodes):
+        # Use first support's skeleton for each episode
+        support_skeletons_aggregated.append(support_skeletons_all[i * num_support_per_episode])
     
     # Repeat support metadata (list) K times
     support_metadata_repeated = []
-    for meta in support_metadata_list:
+    for i in range(num_episodes):
+        # Use first support's metadata
+        meta = support_metadata_list[i * num_support_per_episode]
         support_metadata_repeated.extend([meta] * queries_per_episode)  # Repeat K times
     
     # ========================================================================
@@ -554,9 +599,9 @@ def episodic_collate_fn(batch):
     category_ids_tensor = torch.tensor(category_ids, dtype=torch.long)  # (B,)
     category_ids_tensor = category_ids_tensor.repeat_interleave(queries_per_episode)  # (B*K,)
     
-    # Repeat skeleton edge lists (each skeleton repeated K times)
+    # Repeat skeleton edge lists (each aggregated skeleton repeated K times)
     support_skeletons_repeated = []
-    for skeleton in support_skeletons:
+    for skeleton in support_skeletons_aggregated:
         support_skeletons_repeated.extend([skeleton] * queries_per_episode)
     # Now support_skeletons_repeated has B*K entries
 
@@ -586,7 +631,7 @@ def episodic_collate_fn(batch):
 
 
 def build_episodic_dataloader(base_dataset, category_split_file, split='train',
-                              batch_size=2, num_queries_per_episode=2,
+                              batch_size=2, num_queries_per_episode=2, num_support_per_episode=1,
                               episodes_per_epoch=1000, num_workers=2, seed=None,
                               debug_single_image=None, debug_single_image_category=None):
     """
@@ -613,6 +658,7 @@ def build_episodic_dataloader(base_dataset, category_split_file, split='train',
         category_split_file=category_split_file,
         split=split,
         num_queries_per_episode=num_queries_per_episode,
+        num_support_per_episode=num_support_per_episode,
         episodes_per_epoch=episodes_per_epoch,
         seed=seed,
         debug_single_image=debug_single_image,

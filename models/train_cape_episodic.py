@@ -59,6 +59,8 @@ def get_args_parser():
                         help='How to fuse support with query features')
     parser.add_argument('--num_queries_per_episode', default=2, type=int,
                         help='Number of query images per episode')
+    parser.add_argument('--num_support_per_episode', default=1, type=int,
+                        help='Number of support images per episode (1-shot, 5-shot, etc.)')
     parser.add_argument('--episodes_per_epoch', default=1000, type=int,
                         help='Number of episodes per training epoch')
     parser.add_argument('--category_split_file', default='category_splits.json',
@@ -784,6 +786,7 @@ def main(args):
         split='train',
         batch_size=args.batch_size,
         num_queries_per_episode=args.num_queries_per_episode,
+        num_support_per_episode=args.num_support_per_episode,
         episodes_per_epoch=args.episodes_per_epoch,
         num_workers=args.num_workers,
         seed=args.seed,
@@ -833,6 +836,7 @@ def main(args):
             split='train',  # Split doesn't matter in single-image mode, but use 'train' for consistency
             batch_size=1,  # Single image per batch
             num_queries_per_episode=args.num_queries_per_episode,
+            num_support_per_episode=args.num_support_per_episode,
             episodes_per_epoch=val_episodes,
             num_workers=args.num_workers,
             seed=args.seed + 999,  # Different seed for diversity
@@ -850,6 +854,7 @@ def main(args):
                            # Model outputs fixed-length sequence based on max keypoints seen
                            # To avoid shape mismatches during PCK evaluation, keep batch_size=1 for validation
             num_queries_per_episode=args.num_queries_per_episode,
+            num_support_per_episode=args.num_support_per_episode,
             episodes_per_epoch=val_episodes,
             num_workers=args.num_workers,
             seed=args.seed + 999  # Different seed for diversity

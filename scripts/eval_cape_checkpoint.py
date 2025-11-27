@@ -76,6 +76,8 @@ def get_args_parser():
                        help='Number of episodes to evaluate (None = all)')
     parser.add_argument('--num-queries-per-episode', default=None, type=int,
                        help='Queries per episode (None = use checkpoint default)')
+    parser.add_argument('--num-support-per-episode', default=None, type=int,
+                       help='Support images per episode for K-shot evaluation (None = use checkpoint default, 1-shot)')
     parser.add_argument('--pck-threshold', default=0.2, type=float,
                        help='PCK threshold (fraction of bbox diagonal)')
     
@@ -194,7 +196,7 @@ def load_checkpoint_and_model(checkpoint_path: str, device: torch.device) -> Tup
 
 
 def build_dataloader(args: argparse.Namespace, split: str, num_workers: int,
-                     num_episodes: int = None, num_queries: int = None) -> DataLoader:
+                     num_episodes: int = None, num_queries: int = None, num_support: int = None) -> DataLoader:
     """
     Build episodic dataloader for evaluation.
     
@@ -204,6 +206,7 @@ def build_dataloader(args: argparse.Namespace, split: str, num_workers: int,
         num_workers: Number of dataloader workers
         num_episodes: Number of episodes per epoch (None = use default)
         num_queries: Number of queries per episode (None = use default from args)
+        num_support: Number of support images per episode (None = use default from args, 1-shot)
         
     Returns:
         dataloader: Episodic dataloader
@@ -220,6 +223,9 @@ def build_dataloader(args: argparse.Namespace, split: str, num_workers: int,
     # Use checkpoint values or override
     if num_queries is None:
         num_queries = getattr(args, 'num_queries_per_episode', 2)
+    
+    if num_support is None:
+        num_support = getattr(args, 'num_support_per_episode', 1)
     
     # For validation, use reasonable number of episodes
     if num_episodes is None:
@@ -239,6 +245,7 @@ def build_dataloader(args: argparse.Namespace, split: str, num_workers: int,
         split=split,
         batch_size=1,  # Process one episode at a time for visualization
         num_queries_per_episode=num_queries,
+        num_support_per_episode=num_support,
         episodes_per_epoch=num_episodes,
         num_workers=num_workers,
         seed=42  # Deterministic for visualization
@@ -246,6 +253,7 @@ def build_dataloader(args: argparse.Namespace, split: str, num_workers: int,
     
     print(f"✓ Episodic dataloader:")
     print(f"  Episodes per epoch: {num_episodes}")
+    print(f"  Support per episode: {num_support} ({num_support}-shot)")
     print(f"  Queries per episode: {num_queries}")
     print(f"  Total query samples: {num_episodes * num_queries}")
     print()
@@ -986,7 +994,8 @@ def main():
         args.split,
         args.num_workers,
         num_episodes=args.num_episodes,
-        num_queries=args.num_queries_per_episode
+        num_queries=args.num_queries_per_episode,
+        num_support=args.num_support_per_episode
     )
     
     # Run evaluation
@@ -996,12 +1005,15 @@ def main():
     )
     
     # Add metadata to metrics
+    num_support_used = args.num_support_per_episode or getattr(checkpoint_args, 'num_support_per_episode', 1)
     metrics['checkpoint_path'] = str(args.checkpoint)
     metrics['checkpoint_epoch'] = checkpoint_args.__dict__.get('epoch', 'unknown')
     metrics['split'] = args.split
     metrics['pck_threshold'] = args.pck_threshold
+    metrics['num_support_per_episode'] = num_support_used
+    metrics['num_queries_per_episode'] = args.num_queries_per_episode or getattr(checkpoint_args, 'num_queries_per_episode', 2)
     metrics['num_episodes'] = len(predictions_list)
-    metrics['num_queries_total'] = len(predictions_list) * (args.num_queries_per_episode or checkpoint_args.num_queries_per_episode)
+    metrics['num_queries_total'] = len(predictions_list) * metrics['num_queries_per_episode']
     
     # Save metrics
     save_metrics_to_json(metrics, output_dir, args.split)
