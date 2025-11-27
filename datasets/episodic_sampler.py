@@ -234,17 +234,18 @@ class EpisodicDataset(data.Dataset):
                 # ================================================================
                 # CRITICAL FIX: Create support mask based on visibility
                 # ================================================================
-                # Previously: support_mask was all True (ignoring visibility)
-                # Now: Use visibility information to mark only visible keypoints as valid
-                #
                 # Visibility values (COCO format):
                 #   0 = not labeled (keypoint outside image or not annotated)
                 #   1 = labeled but not visible (occluded)
                 #   2 = labeled and visible
                 #
+                # Mask convention (PyTorch standard):
+                #   - True = IGNORE this position (masked/padding)
+                #   - False = USE this position (valid data)
+                #
                 # For support mask:
-                #   - True (valid) if visibility > 0 (labeled, may be occluded)
-                #   - False (invalid) if visibility == 0 (not labeled)
+                #   - True (masked) if visibility == 0 (not labeled - should be ignored)
+                #   - False (valid) if visibility > 0 (labeled - should be used)
                 # ================================================================
                 
                 # Ensure visibility is present
@@ -263,8 +264,10 @@ class EpisodicDataset(data.Dataset):
                         f"keypoints length ({len(support_coords)}) for image {support_data.get('image_id', 'unknown')}"
                     )
                 
+                # CRITICAL: Mask should be True=ignore, False=use
+                # So we want True when visibility == 0 (not labeled)
                 support_mask = torch.tensor(
-                    [v > 0 for v in support_visibility], 
+                    [v == 0 for v in support_visibility], 
                     dtype=torch.bool
                 )
 

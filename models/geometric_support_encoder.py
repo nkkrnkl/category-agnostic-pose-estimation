@@ -181,7 +181,8 @@ class GeometricSupportEncoder(nn.Module):
         # 5. Optional GCN pre-encoding (from CapeX)
         if self.use_gcn_preenc and self.gcn_layers is not None:
             # Build adjacency matrix from skeleton
-            # Note: ~support_mask because adj_from_skeleton expects True=invalid
+            # support_mask convention: True=masked/ignore, False=valid/use
+            # adj_from_skeleton expects same convention and handles negation internally
             adj = adj_from_skeleton(num_pts, skeleton_edges, support_mask, device)
             # adj: [bs, 2, num_pts, num_pts]
             
@@ -192,10 +193,37 @@ class GeometricSupportEncoder(nn.Module):
         # 6. Transformer self-attention
         # support_mask: True = positions to ignore (mask out)
         # PyTorch convention: True = ignore
-        support_features = self.transformer_encoder(
-            embeddings,
-            src_key_padding_mask=support_mask
-        )  # [bs, num_pts, hidden_dim]
+        
+        # CRITICAL SAFETY CHECK: Handle edge case where ALL keypoints are masked
+        # This can happen with invalid data where all keypoints have visibility==0
+        # PyTorch's nested tensor conversion fails when all elements are masked
+        # Check if any batch element has all keypoints masked (all True)
+        all_masked_per_batch = support_mask.all(dim=1)  # [bs]
+        
+        if all_masked_per_batch.any():
+            # At least one batch element has all keypoints masked (invalid data)
+            # This causes nested tensor conversion to fail
+            # Workaround: temporarily unmask the first keypoint for those batches
+            temp_mask = support_mask.clone()
+            for b in range(support_mask.shape[0]):
+                if all_masked_per_batch[b]:
+                    # Unmask the first keypoint to avoid nested tensor error
+                    # (This shouldn't happen with proper data validation, but we handle it gracefully)
+                    temp_mask[b, 0] = False
+            
+            support_features = self.transformer_encoder(
+                embeddings,
+                src_key_padding_mask=temp_mask
+            )
+            
+            # Zero out features for fully-masked batches (they contain invalid data)
+            support_features[all_masked_per_batch] = 0.0
+        else:
+            # Normal case - process as usual
+            support_features = self.transformer_encoder(
+                embeddings,
+                src_key_padding_mask=support_mask
+            )  # [bs, num_pts, hidden_dim]
         
         return support_features
     
