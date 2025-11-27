@@ -208,7 +208,23 @@ class CAPEModel(nn.Module):
         #   support_coords: (B, N_support, 2)
         #   support_features will be: (B, N_support, D)
         # where B = total number of queries (each with its own support)
-        support_features = self.support_encoder(support_coords, support_mask, skeleton_edges)
+        
+        # ========================================================================
+        # CRITICAL FIX: Handle mask convention differences between encoders
+        # ========================================================================
+        # Dataloader convention: support_mask has True = valid keypoint (visibility > 0)
+        # - Old SupportPoseGraphEncoder: expects True = valid (no conversion needed)
+        # - New GeometricSupportEncoder: expects True = invalid (needs inversion)
+        # ========================================================================
+        if self.use_geometric_encoder:
+            # GeometricSupportEncoder expects True = invalid/invisible
+            # Invert mask: True (valid) → False (valid), False (invalid) → True (invalid)
+            encoder_mask = ~support_mask
+        else:
+            # SupportPoseGraphEncoder expects True = valid (matches dataloader)
+            encoder_mask = support_mask
+        
+        support_features = self.support_encoder(support_coords, encoder_mask, skeleton_edges)
 
         # 2. Process query image through base model with support conditioning
         # We need to inject support features into the decoder
