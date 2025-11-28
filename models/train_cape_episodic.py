@@ -46,6 +46,43 @@ from models.cape_losses import build_cape_criterion
 from models.engine_cape import train_one_epoch_episodic, evaluate_cape
 
 
+def cleanup_old_checkpoints(output_dir, pattern, keep_last_n=3, exclude_pattern=None):
+    """
+    Remove old checkpoints, keeping only the N most recent.
+    
+    Args:
+        output_dir: Directory containing checkpoints
+        pattern: Glob pattern to match checkpoints (e.g., 'checkpoint_e*.pth')
+        keep_last_n: Number of most recent checkpoints to keep
+        exclude_pattern: Optional string to exclude from matches (e.g., 'best')
+    
+    Returns:
+        List of deleted checkpoint paths
+    """
+    output_path = Path(output_dir)
+    checkpoints = list(output_path.glob(pattern))
+    
+    # Filter out checkpoints matching exclude pattern
+    if exclude_pattern:
+        checkpoints = [c for c in checkpoints if exclude_pattern not in c.name]
+    
+    # Sort by modification time (oldest first)
+    checkpoints = sorted(checkpoints, key=lambda p: p.stat().st_mtime)
+    
+    deleted = []
+    if len(checkpoints) > keep_last_n:
+        # Delete oldest checkpoints (keep the newest keep_last_n)
+        to_delete = checkpoints[:-keep_last_n]
+        for ckpt in to_delete:
+            try:
+                ckpt.unlink()
+                deleted.append(ckpt)
+            except Exception as e:
+                print(f"  ⚠️ Failed to delete {ckpt.name}: {e}")
+    
+    return deleted
+
+
 def get_args_parser():
     parser = argparse.ArgumentParser('CAPE Episodic Training', add_help=False)
 
@@ -851,6 +888,18 @@ def main(args):
             checkpoint_dict['cuda_rng_state'] = torch.cuda.get_rng_state_all()
         
         torch.save(checkpoint_dict, checkpoint_path)
+        
+        # ========================================================================
+        # DISK SPACE: Keep only last 3 regular checkpoints
+        # ========================================================================
+        deleted = cleanup_old_checkpoints(
+            args.output_dir, 
+            pattern='checkpoint_e*.pth',
+            keep_last_n=3,
+            exclude_pattern='best'  # Don't delete best checkpoints
+        )
+        if deleted:
+            print(f"  🗑️  Cleaned up {len(deleted)} old checkpoint(s)")
 
         # ========================================================================
         # CRITICAL FIX: Track and save best PCK model (validation = unseen categories)
@@ -897,6 +946,17 @@ def main(args):
             
             torch.save(best_pck_dict, best_pck_path)
             print(f"  ✓ Saved BEST PCK model (PCK: {val_pck:.4f}, Mean PCK: {val_pck_mean:.4f})")
+            
+            # ========================================================================
+            # DISK SPACE: Keep only last 3 best checkpoints
+            # ========================================================================
+            deleted_best = cleanup_old_checkpoints(
+                args.output_dir,
+                pattern='checkpoint_best_pck_*.pth',
+                keep_last_n=3
+            )
+            if deleted_best:
+                print(f"  🗑️  Cleaned up {len(deleted_best)} old best checkpoint(s)")
         
         # Report progress (early stopping based on PCK)
         if not pck_improved:
