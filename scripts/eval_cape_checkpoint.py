@@ -30,6 +30,7 @@ os.environ.setdefault('PYTORCH_ENABLE_MPS_FALLBACK', '1')
 import argparse
 import json
 import sys
+import tempfile
 from pathlib import Path
 from typing import Dict, List, Tuple
 import numpy as np
@@ -48,6 +49,7 @@ sys.path.insert(0, str(project_root))
 
 from datasets.mp100_cape import build_mp100_cape
 from datasets.episodic_sampler import build_episodic_dataloader
+from datasets.mp100_splits import load_mp100_split
 from models import build_model
 from models.cape_model import build_cape_model
 from util.eval_utils import PCKEvaluator, compute_pck_bbox
@@ -237,7 +239,46 @@ def build_dataloader(args: argparse.Namespace, split: str, num_workers: int,
             num_episodes = 50  # Fewer for train split
     
     # Build episodic dataloader
-    category_split_file = Path(args.dataset_root) / args.category_split_file
+    # Extract categories directly from annotation files to match the split being used
+    split_id = getattr(args, 'mp100_split', 1)
+    print(f"Extracting categories from MP-100 split {split_id} annotation files...")
+    
+    try:
+        # Load categories directly from annotation files (split-specific)
+        mp100_split_data = load_mp100_split(args.dataset_root, split_id=split_id)
+        
+        # Try to load val categories if val annotation file exists
+        val_categories = []
+        val_file = Path(args.dataset_root) / f'annotations/mp100_split{split_id}_val.json'
+        if val_file.exists():
+            with open(val_file) as f:
+                val_data = json.load(f)
+                val_categories = sorted([c['id'] for c in val_data['categories']])
+        
+        # Create a temporary category_splits dict matching the expected format
+        temp_category_splits = {
+            'train': mp100_split_data['train'],
+            'test': mp100_split_data['test'],
+            'val': val_categories
+        }
+        
+        # Create a temporary JSON file
+        temp_file = tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False)
+        json.dump(temp_category_splits, temp_file)
+        temp_file.close()
+        category_split_file = temp_file.name
+        
+        print(f"✓ Using categories from split {split_id}:")
+        print(f"  Train: {len(temp_category_splits['train'])} categories")
+        print(f"  Test: {len(temp_category_splits['test'])} categories")
+        if temp_category_splits['val']:
+            print(f"  Val: {len(temp_category_splits['val'])} categories")
+        print()
+        
+    except Exception as e:
+        print(f"⚠️  Warning: Could not load split-specific categories: {e}")
+        print(f"   Falling back to category_split_file from checkpoint args")
+        category_split_file = Path(args.dataset_root) / args.category_split_file
     
     dataloader = build_episodic_dataloader(
         base_dataset=dataset,
