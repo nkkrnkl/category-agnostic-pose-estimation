@@ -64,6 +64,9 @@ class EpisodicSampler:
             raise ValueError(f"Unknown split: {split}. Must be 'train', 'val', or 'test'")
 
         print(f"Episodic sampler for {split} split: {len(self.categories)} categories")
+        
+        # Store original categories for diagnostics
+        original_categories = self.categories.copy()
 
         # Build category -> image indices mapping
         self.category_to_indices = defaultdict(list)
@@ -89,6 +92,40 @@ class EpisodicSampler:
         ]
 
         print(f"Valid categories (>={min_examples} examples): {len(self.categories)}")
+        
+        # Check if we have any valid categories
+        if len(self.categories) == 0:
+            # Collect diagnostic information
+            category_counts = {cat: len(self.category_to_indices[cat]) for cat in original_categories}
+            categories_with_samples = {cat: count for cat, count in category_counts.items() if count > 0}
+            categories_without_samples = {cat: count for cat, count in category_counts.items() if count == 0}
+            
+            error_msg = (
+                f"\n❌ No valid categories found for {split} split after filtering.\n"
+                f"   Required: at least {min_examples} examples per category "
+                f"(num_support={num_support_per_episode} + num_queries={num_queries_per_episode})\n\n"
+            )
+            
+            if categories_with_samples:
+                error_msg += f"   Categories with samples (but insufficient):\n"
+                for cat, count in sorted(categories_with_samples.items()):
+                    error_msg += f"      Category {cat}: {count} samples (need {min_examples})\n"
+                error_msg += "\n"
+            
+            if categories_without_samples:
+                error_msg += f"   Categories with NO samples in dataset: {len(categories_without_samples)}\n"
+                error_msg += f"      {sorted(categories_without_samples.keys())}\n\n"
+            
+            error_msg += (
+                f"   Please check:\n"
+                f"   1. The dataset annotation file matches the split (e.g., mp100_splitX_{split}.json)\n"
+                f"   2. The category_split_file contains the correct categories for this split\n"
+                f"   3. The dataset_root path is correct\n"
+                f"   4. Each category has at least {min_examples} samples in the annotation file"
+            )
+            
+            raise ValueError(error_msg)
+        
         print(f"Samples per category: min={min([len(self.category_to_indices[c]) for c in self.categories])}, "
               f"max={max([len(self.category_to_indices[c]) for c in self.categories])}")
 
