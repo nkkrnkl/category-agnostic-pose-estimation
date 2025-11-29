@@ -105,7 +105,9 @@ def get_args_parser():
     
     # Evaluation arguments
     parser.add_argument('--num-episodes', default=None, type=int,
-                       help='Number of episodes to evaluate (None = all)')
+                       help='Number of episodes to evaluate (None = use default per split)')
+    parser.add_argument('--full-split', action='store_true',
+                       help='Evaluate on ALL images in the split (overrides --num-episodes)')
     parser.add_argument('--eval_seed', default=123, type=int,
                        help='Random seed for reproducible evaluation (default: 123)')
     parser.add_argument('--num-queries-per-episode', default=None, type=int,
@@ -235,7 +237,7 @@ def load_checkpoint_and_model(checkpoint_path: str, device: torch.device) -> Tup
 
 def build_dataloader(args: argparse.Namespace, split: str, num_workers: int,
                      num_episodes: int = None, num_queries: int = None,
-                     eval_seed: int = 123) -> DataLoader:
+                     eval_seed: int = 123, full_split: bool = False) -> DataLoader:
     """
     Build episodic dataloader for evaluation.
     
@@ -246,6 +248,7 @@ def build_dataloader(args: argparse.Namespace, split: str, num_workers: int,
         num_episodes: Number of episodes per epoch (None = use default)
         num_queries: Number of queries per episode (None = use default from args)
         eval_seed: Random seed for reproducible evaluation (default: 123)
+        full_split: If True, evaluate on all images in the split
         
     Returns:
         dataloader: Episodic dataloader
@@ -263,8 +266,15 @@ def build_dataloader(args: argparse.Namespace, split: str, num_workers: int,
     if num_queries is None:
         num_queries = getattr(args, 'num_queries_per_episode', 2)
     
-    # For validation, use reasonable number of episodes
-    if num_episodes is None:
+    # Handle full_split mode: evaluate ALL images in the split
+    if full_split:
+        # Calculate number of episodes needed to cover all images
+        # Each episode uses 1 support + num_queries query images
+        # To cover all images at least once: total_images / num_queries
+        num_episodes = max(1, len(dataset) // num_queries)
+        print(f"✓ Full split mode: {num_episodes} episodes to cover ~{len(dataset)} images")
+    elif num_episodes is None:
+        # Default episodes per split
         if split == 'val':
             num_episodes = 100  # Default: 100 episodes for thorough evaluation
         elif split == 'test':
@@ -1073,6 +1083,12 @@ def main():
     print()
     print(f"Checkpoint: {args.checkpoint}")
     print(f"Split: {args.split}")
+    if args.full_split:
+        print(f"Mode: FULL SPLIT (evaluating all images)")
+    elif args.num_episodes:
+        print(f"Mode: {args.num_episodes} episodes")
+    else:
+        print(f"Mode: default episodes for {args.split} split")
     print(f"Output: {args.output_dir}")
     print(f"Eval Seed: {args.eval_seed} (for reproducibility)")
     print()
@@ -1115,7 +1131,8 @@ def main():
         args.num_workers,
         num_episodes=args.num_episodes,
         num_queries=args.num_queries_per_episode,
-        eval_seed=args.eval_seed
+        eval_seed=args.eval_seed,
+        full_split=args.full_split
     )
     
     # Run evaluation
