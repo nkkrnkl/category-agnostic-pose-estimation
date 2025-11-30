@@ -846,24 +846,33 @@ def build_mp100_cape(image_set, args):
     # Paths
     # data folder is in dataset_root/data
     root = Path(args.dataset_root) / "data"
-    # Try clean_annotations first, fall back to annotations if not found
+    # Try multiple annotation locations (in order of preference)
     # Use resolve() to convert relative paths to absolute first
     dataset_root_resolved = Path(args.dataset_root).resolve()
-    clean_ann_file = dataset_root_resolved / "clean_annotations" / f"mp100_split{split_num}_{image_set}.json"
-    regular_ann_file = dataset_root_resolved / "annotations" / f"mp100_split{split_num}_{image_set}.json"
     
-    # Prefer clean_annotations if it exists, otherwise use annotations
-    if clean_ann_file.exists():
-        ann_file = clean_ann_file
-        print(f"Using cleaned annotations: {ann_file}")
-    elif regular_ann_file.exists():
-        ann_file = regular_ann_file
-        print(f"Using regular annotations: {ann_file}")
-    else:
+    # Check these locations in order:
+    # 1. data/cleaned_annotations (Colab GCS mount location)
+    # 2. clean_annotations (root level)
+    # 3. annotations (root level, standard location)
+    annotation_paths = [
+        dataset_root_resolved / "data" / "cleaned_annotations" / f"mp100_split{split_num}_{image_set}.json",
+        dataset_root_resolved / "clean_annotations" / f"mp100_split{split_num}_{image_set}.json",
+        dataset_root_resolved / "annotations" / f"mp100_split{split_num}_{image_set}.json",
+    ]
+    
+    ann_file = None
+    for path in annotation_paths:
+        if path.exists():
+            ann_file = path
+            print(f"Using annotations: {ann_file}")
+            break
+    
+    if ann_file is None:
         raise FileNotFoundError(
-            f"Annotation file not found in either location:\n"
-            f"  - {clean_ann_file}\n"
-            f"  - {regular_ann_file}"
+            f"Annotation file not found in any location:\n"
+            f"  - {annotation_paths[0]}\n"
+            f"  - {annotation_paths[1]}\n"
+            f"  - {annotation_paths[2]}"
         )
 
     # ========================================================================

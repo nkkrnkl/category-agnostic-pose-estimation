@@ -15,24 +15,37 @@ def load_mp100_split(dataset_root, split_id=1):
         dict with train, test, split_id, total_categories
     """
     dataset_root = Path(dataset_root)
-    # Try clean_annotations first, fall back to annotations if not found
-    clean_train_file = dataset_root / f'clean_annotations/mp100_split{split_id}_train.json'
-    clean_test_file = dataset_root / f'clean_annotations/mp100_split{split_id}_test.json'
-    regular_train_file = dataset_root / f'annotations/mp100_split{split_id}_train.json'
-    regular_test_file = dataset_root / f'annotations/mp100_split{split_id}_test.json'
+    # Try multiple annotation locations (in order of preference)
+    # 1. data/cleaned_annotations (Colab GCS mount location)
+    # 2. clean_annotations (root level)
+    # 3. annotations (root level, standard location)
+    annotation_locations = [
+        (dataset_root / 'data' / 'cleaned_annotations', 'data/cleaned_annotations'),
+        (dataset_root / 'clean_annotations', 'clean_annotations'),
+        (dataset_root / 'annotations', 'annotations'),
+    ]
     
-    # Prefer clean_annotations if both exist, otherwise use annotations
-    if clean_train_file.exists() and clean_test_file.exists():
-        train_file = clean_train_file
-        test_file = clean_test_file
-    elif regular_train_file.exists() and regular_test_file.exists():
-        train_file = regular_train_file
-        test_file = regular_test_file
-    else:
+    train_file = None
+    test_file = None
+    used_location = None
+    
+    for location, location_name in annotation_locations:
+        train_candidate = location / f'mp100_split{split_id}_train.json'
+        test_candidate = location / f'mp100_split{split_id}_test.json'
+        
+        if train_candidate.exists() and test_candidate.exists():
+            train_file = train_candidate
+            test_file = test_candidate
+            used_location = location_name
+            break
+    
+    if train_file is None or test_file is None:
+        tried_locations = '\n'.join([
+            f"  - {loc[0] / f'mp100_split{split_id}_train.json'}, {loc[0] / f'mp100_split{split_id}_test.json'}"
+            for loc in annotation_locations
+        ])
         raise FileNotFoundError(
-            f"MP-100 split {split_id} not found. "
-            f"Tried clean_annotations: {clean_train_file}, {clean_test_file}\n"
-            f"Tried annotations: {regular_train_file}, {regular_test_file}"
+            f"MP-100 split {split_id} not found. Tried:\n{tried_locations}"
         )
     with open(train_file) as f:
         train_data = json.load(f)
