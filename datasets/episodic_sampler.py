@@ -146,6 +146,8 @@ class EpisodicDataset(data.Dataset):
         self.fixed_episodes = fixed_episodes
         self.load_support_images = load_support_images
         self._cached_episodes = None  # Will store pre-generated episodes if fixed_episodes=True
+        self.debug_single_image = None  # For debug mode (single image overfitting test)
+        self.debug_single_image_category = None  # Category ID for debug mode
 
         # Create episodic sampler
         self.sampler = EpisodicSampler(
