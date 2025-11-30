@@ -1,1 +1,0 @@
-from polygon import SoftPolygon
