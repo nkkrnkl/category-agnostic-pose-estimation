@@ -15,12 +15,24 @@ def load_mp100_split(dataset_root, split_id=1):
         dict with train, test, split_id, total_categories
     """
     dataset_root = Path(dataset_root)
-    train_file = dataset_root / f'clean_annotations/mp100_split{split_id}_train.json'
-    test_file = dataset_root / f'clean_annotations/mp100_split{split_id}_test.json'
-    if not train_file.exists() or not test_file.exists():
+    # Try clean_annotations first, fall back to annotations if not found
+    clean_train_file = dataset_root / f'clean_annotations/mp100_split{split_id}_train.json'
+    clean_test_file = dataset_root / f'clean_annotations/mp100_split{split_id}_test.json'
+    regular_train_file = dataset_root / f'annotations/mp100_split{split_id}_train.json'
+    regular_test_file = dataset_root / f'annotations/mp100_split{split_id}_test.json'
+    
+    # Prefer clean_annotations if both exist, otherwise use annotations
+    if clean_train_file.exists() and clean_test_file.exists():
+        train_file = clean_train_file
+        test_file = clean_test_file
+    elif regular_train_file.exists() and regular_test_file.exists():
+        train_file = regular_train_file
+        test_file = regular_test_file
+    else:
         raise FileNotFoundError(
             f"MP-100 split {split_id} not found. "
-            f"Expected: {train_file} and {test_file}"
+            f"Tried clean_annotations: {clean_train_file}, {clean_test_file}\n"
+            f"Tried annotations: {regular_train_file}, {regular_test_file}"
         )
     with open(train_file) as f:
         train_data = json.load(f)

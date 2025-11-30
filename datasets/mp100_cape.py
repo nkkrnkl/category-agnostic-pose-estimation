@@ -846,12 +846,25 @@ def build_mp100_cape(image_set, args):
     # Paths
     # data folder is in dataset_root/data
     root = Path(args.dataset_root) / "data"
-    # annotations are in dataset_root/clean_annotations (using cleaned annotations)
+    # Try clean_annotations first, fall back to annotations if not found
     # Use resolve() to convert relative paths to absolute first
-    ann_file = Path(args.dataset_root).resolve() / "clean_annotations" / f"mp100_split{split_num}_{image_set}.json"
-
-    if not ann_file.exists():
-        raise FileNotFoundError(f"Annotation file not found: {ann_file}")
+    dataset_root_resolved = Path(args.dataset_root).resolve()
+    clean_ann_file = dataset_root_resolved / "clean_annotations" / f"mp100_split{split_num}_{image_set}.json"
+    regular_ann_file = dataset_root_resolved / "annotations" / f"mp100_split{split_num}_{image_set}.json"
+    
+    # Prefer clean_annotations if it exists, otherwise use annotations
+    if clean_ann_file.exists():
+        ann_file = clean_ann_file
+        print(f"Using cleaned annotations: {ann_file}")
+    elif regular_ann_file.exists():
+        ann_file = regular_ann_file
+        print(f"Using regular annotations: {ann_file}")
+    else:
+        raise FileNotFoundError(
+            f"Annotation file not found in either location:\n"
+            f"  - {clean_ann_file}\n"
+            f"  - {regular_ann_file}"
+        )
 
     # ========================================================================
     # GEOMETRIC + APPEARANCE AUGMENTATION FOR TRAINING
