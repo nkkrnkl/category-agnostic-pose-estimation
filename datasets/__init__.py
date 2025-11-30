@@ -1,11 +1,7 @@
 import torch.utils.data
-
 from .mp100_cape import build_mp100_cape
-
-
 def build_dataset(image_set, args):
     if args.semantic_classes > 0:
-        # assert args.dataset_name == 'stru3d', "Semantically-rich floorplans only support Structured3D"
         pass
     if args.dataset_name == 'mp100':
         print(f"Build MP-100 CAPE {image_set} dataset")
@@ -14,10 +10,8 @@ def build_dataset(image_set, args):
         raise ValueError(f'Polygon datasets not supported in CAPE. Only MP-100 is supported. '
                         f'(poly_data.py was removed as part of CAPE implementation cleanup)')
     raise ValueError(f'dataset {args.dataset_name} not supported')
-
 def get_dataset_class_labels(dataset_name):
     semantics_label = None
-    
     if dataset_name == 'stru3d':
         semantics_label = {
             0: 'Living Room',
@@ -67,9 +61,5 @@ def get_dataset_class_labels(dataset_name):
             'washing_room': 9, 
             'PS': 10, 
             'outside': 11}
-    
     id2class = {v: k for k, v in semantics_label.items()} if semantics_label else None
-    
     return semantics_label, id2class
-
-    

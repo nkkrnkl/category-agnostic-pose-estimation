@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
 Visualize CAPE Pose Predictions on Unseen Test Categories
-
 This script:
 1. Loads a trained CAPE model from checkpoint
 2. Loads test images from UNSEEN categories (never seen during training)
@@ -13,7 +12,6 @@ This script:
    - Right: Query image with predicted (red X) and GT (cyan circles) keypoints
 5. Computes and displays PCK@0.2 for each prediction
 6. Saves all visualizations to output directory
-
 Usage:
     python visualize_cape_predictions.py \\
         --checkpoint outputs/cape_run/checkpoint_best_pck_*.pth \\
@@ -21,19 +19,13 @@ Usage:
         --num_samples 5 \\
         --output_dir visualizations/best_model
 """
-
-# Enable MPS fallback for unsupported operations on Apple Silicon
-# This must be set BEFORE importing torch
 import os
 import sys
 os.environ.setdefault('PYTORCH_ENABLE_MPS_FALLBACK', '1')
-
-# Add parent directory to path for imports
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
-
 import argparse
 import torch
 import numpy as np
@@ -43,70 +35,46 @@ import json
 from PIL import Image
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
-
 from models.roomformer_v2 import build as build_base_model
 from models.cape_model import build_cape_model
 from datasets.mp100_cape import build_mp100_cape, ImageNotFoundError
 from datasets.token_types import TokenType
 from datasets.discrete_tokenizer import DiscreteTokenizer
-
-# Standard resize dimension used in preprocessing (must match dataset transforms)
 TARGET_SIZE = 512
-
-
 def ensure_image_size(image, target_size=TARGET_SIZE):
     """
     Ensure image is exactly target_size x target_size.
     If not, resize it (preserving aspect ratio and padding if needed).
-    
     Args:
         image: numpy array (H, W, 3) or PIL Image
         target_size: Target size (default: 512)
-    
     Returns:
         numpy array (target_size, target_size, 3) in uint8 format
     """
     if isinstance(image, Image.Image):
         image = np.array(image)
-    
     h, w = image.shape[:2]
-    
-    # If already correct size, return as-is
     if h == target_size and w == target_size:
         if image.dtype != np.uint8:
-            # Ensure uint8 format
             if image.max() <= 1.0:
                 image = (image * 255).astype(np.uint8)
             else:
                 image = image.astype(np.uint8)
         return image
-    
-    # Resize to target_size x target_size
     import cv2
     resized = cv2.resize(image, (target_size, target_size), interpolation=cv2.INTER_CUBIC)
-    
     if resized.dtype != np.uint8:
         if resized.max() <= 1.0:
             resized = (resized * 255).astype(np.uint8)
         else:
             resized = resized.astype(np.uint8)
-    
     return resized
-
-
 def load_model(checkpoint_path):
     """Load trained CAPE model from checkpoint."""
     print(f"Loading model from {checkpoint_path}...")
-
-    # Load checkpoint (contains model weights + training args)
     checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
-
-    # Use saved training args
     train_args = checkpoint['args']
     print(f"  Using training config (epoch {checkpoint.get('epoch', '?')})")
-
-    # Create tokenizer (needed by the base model for sequence generation)
-    # vocab_size = num_bins^2, so num_bins = sqrt(vocab_size)
     import numpy as np
     num_bins = int(np.sqrt(train_args.vocab_size))
     tokenizer = DiscreteTokenizer(
@@ -114,71 +82,47 @@ def load_model(checkpoint_path):
         seq_len=train_args.seq_len,
         add_cls=getattr(train_args, 'add_cls_token', False)
     )
-
-    # Build model with saved args
     build_result = build_base_model(train_args, train=False, tokenizer=tokenizer)
     if isinstance(build_result, tuple):
         base_model = build_result[0]
     else:
         base_model = build_result
     model = build_cape_model(train_args, base_model)
-
-    # Load weights (strict=False to handle architecture differences)
     missing_keys, unexpected_keys = model.load_state_dict(checkpoint['model'], strict=False)
     if missing_keys:
         print(f"  Warning: Missing keys in checkpoint: {len(missing_keys)} keys")
     if unexpected_keys:
         print(f"  Warning: Unexpected keys in checkpoint: {len(unexpected_keys)} keys")
     model.eval()
-
     print(f"✓ Model loaded successfully")
     return model, train_args
-
-
 def decode_sequence_to_keypoints(pred_tokens, pred_coords, tokenizer, max_keypoints=None):
     """
     Decode predicted token sequence to keypoint coordinates.
-
     Args:
         pred_tokens: (seq_len,) Token predictions
         pred_coords: (seq_len, 2) Coordinate predictions (normalized [0,1] relative to 512x512)
         tokenizer: Tokenizer for decoding
         max_keypoints: Optional maximum number of keypoints to extract (stops early if reached)
-
     Returns:
         keypoints: List of (x, y) coordinates in normalized [0,1] space (relative to 512x512)
     """
     keypoints = []
-
     for i in range(len(pred_tokens)):
-        # Stop if we've reached the maximum number of keypoints
         if max_keypoints is not None and len(keypoints) >= max_keypoints:
             break
-            
         token = pred_tokens[i].item()
-
-        # Check if this is a coordinate token
         if token == TokenType.coord.value:
-            # Coordinates are at the SAME position as the coord token
             if i < len(pred_coords):
-                x, y = pred_coords[i]  # pred_coords stores normalized [0,1] values
+                x, y = pred_coords[i]
                 x_val, y_val = x.item(), y.item()
-                
-                # Clamp to [0,1] range (model may output slightly outside due to numerical precision)
                 x_val = max(0.0, min(1.0, x_val))
                 y_val = max(0.0, min(1.0, y_val))
-                
-                # Filter out invalid coordinates (NaN, Inf)
                 if (np.isfinite(x_val) and np.isfinite(y_val)):
                     keypoints.append((x_val, y_val))
-
-        # Stop at EOS token
         elif token == TokenType.eos.value:
             break
-
     return keypoints
-
-
 def visualize_pose_prediction(support_image, query_image, pred_keypoints, 
                               support_keypoints, gt_keypoints=None,
                               skeleton_edges=None, save_path=None,
@@ -187,10 +131,8 @@ def visualize_pose_prediction(support_image, query_image, pred_keypoints,
     """
     Visualize predicted pose vs ground truth and support template.
     Creates a 3-panel layout: Support (GT), Ground Truth, Predicted.
-
     CRITICAL: All keypoints are normalized [0,1] relative to 512x512 resized images.
     The images passed in MUST be 512x512 (resized) to match the coordinate frame.
-
     Args:
         support_image: PIL Image or numpy array (H, W, 3) - MUST be 512x512 resized image
         query_image: PIL Image or numpy array (H, W, 3) - MUST be 512x512 resized image
@@ -207,14 +149,8 @@ def visualize_pose_prediction(support_image, query_image, pred_keypoints,
         support_image = np.array(support_image)
     if isinstance(query_image, Image.Image):
         query_image = np.array(query_image)
-
-    # CRITICAL: Verify images are 512x512 (the coordinate frame)
     support_h, support_w = support_image.shape[:2]
     query_h, query_w = query_image.shape[:2]
-    
-    # Use the global TARGET_SIZE constant
-    
-    # Warn if images are not 512x512 (coordinate mismatch)
     if support_w != TARGET_SIZE or support_h != TARGET_SIZE:
         import warnings
         warnings.warn(
@@ -222,7 +158,6 @@ def visualize_pose_prediction(support_image, query_image, pred_keypoints,
             f"Coordinates are normalized relative to {TARGET_SIZE}x{TARGET_SIZE}. "
             f"Visualization may be misaligned!"
         )
-    
     if query_w != TARGET_SIZE or query_h != TARGET_SIZE:
         import warnings
         warnings.warn(
@@ -230,80 +165,55 @@ def visualize_pose_prediction(support_image, query_image, pred_keypoints,
             f"Coordinates are normalized relative to {TARGET_SIZE}x{TARGET_SIZE}. "
             f"Visualization may be misaligned!"
         )
-
-    # Create figure with three subplots
     fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(24, 8))
-
-    # Panel 1: Support (GT) - Support image with ground truth keypoints
     ax1.imshow(support_image)
     ax1.set_title("Support (GT)", fontsize=14, fontweight='bold')
     ax1.axis('off')
-
-    # Draw support keypoints (green circles)
     if support_keypoints:
         support_kpts_array = np.array(support_keypoints)
-        # CRITICAL FIX: Denormalize by TARGET_SIZE (512), not image dimensions
-        # Coordinates are normalized relative to 512x512, regardless of actual image size
         if support_kpts_array.max() <= 1.0:
             support_kpts_array = support_kpts_array.copy()
             support_kpts_array[:, 0] *= TARGET_SIZE
             support_kpts_array[:, 1] *= TARGET_SIZE
-        # If already in pixel coordinates (max > 1.0), use as-is but clamp to image bounds
         else:
             support_kpts_array = support_kpts_array.copy()
             support_kpts_array[:, 0] = np.clip(support_kpts_array[:, 0], 0, support_w - 1)
             support_kpts_array[:, 1] = np.clip(support_kpts_array[:, 1], 0, support_h - 1)
-        
         ax1.scatter(support_kpts_array[:, 0], support_kpts_array[:, 1],
                    c='lime', s=120, marker='o', edgecolors='black', linewidths=2,
                    label='Ground Truth', zorder=3)
-
-        # Draw skeleton edges if available
         if skeleton_edges:
             for edge in skeleton_edges:
                 if len(edge) == 2:
                     src_idx, dst_idx = edge
-                    # Convert 1-indexed to 0-indexed
                     if src_idx > 0:
                         src_idx -= 1
                     if dst_idx > 0:
                         dst_idx -= 1
-
                     if 0 <= src_idx < len(support_keypoints) and 0 <= dst_idx < len(support_keypoints):
                         x1, y1 = support_kpts_array[src_idx]
                         x2, y2 = support_kpts_array[dst_idx]
                         ax1.plot([x1, x2], [y1, y2], 'lime', linewidth=2, alpha=0.6, zorder=2)
-
     ax1.legend(loc='upper right', fontsize=10)
-
-    # Panel 2: Ground Truth - Query image with ground truth keypoints only
     title_text = "Ground Truth"
     if pck_score is not None:
         title_text += f"\nPCK@0.2: {pck_score:.1%}"
     ax2.set_title(title_text, fontsize=14, fontweight='bold')
     ax2.imshow(query_image)
     ax2.axis('off')
-
-    # Draw ground truth keypoints (cyan circles)
     if gt_keypoints:
         gt_kpts_array = np.array(gt_keypoints)
-        # CRITICAL FIX: Denormalize by TARGET_SIZE (512), not image dimensions
-        # Coordinates are normalized relative to 512x512, regardless of actual image size
         if gt_kpts_array.max() <= 1.0:
             gt_kpts_array = gt_kpts_array.copy()
             gt_kpts_array[:, 0] *= TARGET_SIZE
             gt_kpts_array[:, 1] *= TARGET_SIZE
-        # If already in pixel coordinates (max > 1.0), use as-is but clamp to image bounds
         else:
             gt_kpts_array = gt_kpts_array.copy()
             gt_kpts_array[:, 0] = np.clip(gt_kpts_array[:, 0], 0, query_w - 1)
             gt_kpts_array[:, 1] = np.clip(gt_kpts_array[:, 1], 0, query_h - 1)
-        
         ax2.scatter(gt_kpts_array[:, 0], gt_kpts_array[:, 1],
                    c='cyan', s=120, marker='o', edgecolors='black', linewidths=2,
                    label='Ground Truth', zorder=2)
-        
-        # Draw GT skeleton
         if skeleton_edges:
             for edge in skeleton_edges:
                 if len(edge) == 2:
@@ -312,15 +222,11 @@ def visualize_pose_prediction(support_image, query_image, pred_keypoints,
                         src_idx -= 1
                     if dst_idx > 0:
                         dst_idx -= 1
-
                     if 0 <= src_idx < len(gt_keypoints) and 0 <= dst_idx < len(gt_keypoints):
                         x1, y1 = gt_kpts_array[src_idx]
                         x2, y2 = gt_kpts_array[dst_idx]
                         ax2.plot([x1, x2], [y1, y2], 'cyan', linewidth=2, alpha=0.6, zorder=1)
-
     ax2.legend(loc='upper right', fontsize=10)
-
-    # Panel 3: Predicted - Query image with predicted keypoints only
     title_text = "Predicted"
     if pck_score is not None:
         title_text += f"\nPCK@0.2: {pck_score:.1%}"
@@ -329,41 +235,25 @@ def visualize_pose_prediction(support_image, query_image, pred_keypoints,
     ax3.set_title(title_text, fontsize=14, fontweight='bold')
     ax3.imshow(query_image)
     ax3.axis('off')
-
-    # Draw predicted keypoints (red X marks)
     if pred_keypoints:
         pred_kpts_array = np.array(pred_keypoints)
-        
-        # Limit to GT count for fair comparison (if GT available)
-        # This helps identify false positive predictions
         if gt_keypoints is not None:
             num_gt = len(gt_keypoints)
             num_pred = len(pred_kpts_array)
             if num_pred > num_gt:
-                # Model predicted more keypoints than expected - show all but note the mismatch
                 if debug_coords:
                     print(f"  ⚠️  Model predicted {num_pred} keypoints but GT has {num_gt} (extra predictions shown)")
-                # Optionally limit to GT count for cleaner visualization
-                # Uncomment the next line to only show first N predictions matching GT count
-                # pred_kpts_array = pred_kpts_array[:num_gt]
-        
-        # CRITICAL FIX: Denormalize by TARGET_SIZE (512), not image dimensions
-        # Coordinates are normalized relative to 512x512, regardless of actual image size
         if pred_kpts_array.max() <= 1.0:
             pred_kpts_array = pred_kpts_array.copy()
             pred_kpts_array[:, 0] *= TARGET_SIZE
             pred_kpts_array[:, 1] *= TARGET_SIZE
-        # If already in pixel coordinates (max > 1.0), use as-is but clamp to image bounds
         else:
             pred_kpts_array = pred_kpts_array.copy()
             pred_kpts_array[:, 0] = np.clip(pred_kpts_array[:, 0], 0, query_w - 1)
             pred_kpts_array[:, 1] = np.clip(pred_kpts_array[:, 1], 0, query_h - 1)
-
         ax3.scatter(pred_kpts_array[:, 0], pred_kpts_array[:, 1],
                    c='red', s=120, marker='x', linewidths=3,
                    label='Predicted', zorder=3)
-
-        # Draw predicted skeleton
         if skeleton_edges:
             for edge in skeleton_edges:
                 if len(edge) == 2:
@@ -372,59 +262,39 @@ def visualize_pose_prediction(support_image, query_image, pred_keypoints,
                         src_idx -= 1
                     if dst_idx > 0:
                         dst_idx -= 1
-
                     if 0 <= src_idx < len(pred_keypoints) and 0 <= dst_idx < len(pred_keypoints):
                         x1, y1 = pred_kpts_array[src_idx]
                         x2, y2 = pred_kpts_array[dst_idx]
                         ax3.plot([x1, x2], [y1, y2], 'red', linewidth=2, alpha=0.6, zorder=2)
-
     ax3.legend(loc='upper right', fontsize=10)
-
-    # ========================================================================
-    # COORDINATE COMPARISON DEBUGGING
-    # ========================================================================
-    # Print numerical comparison of GT vs predicted coordinates
-    # This helps diagnose visualization/coordinate bugs
-    # ========================================================================
     if debug_coords and gt_keypoints and pred_keypoints:
-        # Also print PCK score for context
         if pck_score is not None:
             print(f"\n  PCK@0.2 score: {pck_score:.1%}")
             print(f"  NOTE: This is PCK for THIS SPECIFIC IMAGE, not the validation set average.")
         print(f"\n{'='*80}")
         print(f"COORDINATE COMPARISON DEBUG: {category_name}")
         print(f"{'='*80}")
-        
-        # Convert to arrays for comparison
         gt_array = np.array(gt_keypoints)
         pred_array = np.array(pred_keypoints)
-        
-        # Denormalize both to pixel coordinates (512x512 frame)
         if gt_array.max() <= 1.0:
             gt_px = gt_array.copy() * TARGET_SIZE
         else:
             gt_px = gt_array.copy()
-        
         if pred_array.max() <= 1.0:
             pred_px = pred_array.copy() * TARGET_SIZE
         else:
             pred_px = pred_array.copy()
-        
-        # Compute differences
         num_kpts = min(len(gt_px), len(pred_px))
         if num_kpts > 0:
             gt_trimmed = gt_px[:num_kpts]
             pred_trimmed = pred_px[:num_kpts]
             abs_diff = np.abs(gt_trimmed - pred_trimmed)
             euclidean_dist = np.sqrt(np.sum(abs_diff ** 2, axis=1))
-            
-            # Check for keypoint count mismatch
             num_pred_total = len(pred_keypoints) if pred_keypoints else 0
             num_gt_total = len(gt_keypoints) if gt_keypoints else 0
             if num_pred_total != num_gt_total:
                 print(f"  ⚠️  Keypoint count mismatch: {num_pred_total} predicted vs {num_gt_total} GT")
                 print(f"     (PCK computed on first {num_kpts} keypoints)")
-            
             print(f"  Number of keypoints (for comparison): {num_kpts}")
             print(f"  GT coordinates (pixels, first 5):")
             for i in range(min(5, num_kpts)):
@@ -435,43 +305,31 @@ def visualize_pose_prediction(support_image, query_image, pred_keypoints,
             print(f"  Absolute differences (pixels, first 5):")
             for i in range(min(5, num_kpts)):
                 print(f"    Kpt {i}: dx={abs_diff[i,0]:.2f}, dy={abs_diff[i,1]:.2f}, dist={euclidean_dist[i]:.2f}")
-            
             mean_dist = np.mean(euclidean_dist)
             max_dist = np.max(euclidean_dist)
             print(f"  Mean Euclidean distance: {mean_dist:.2f} pixels")
             print(f"  Max Euclidean distance: {max_dist:.2f} pixels")
-            
-            # PCK threshold info
             if pck_score is not None:
-                threshold_px = 0.2 * np.sqrt(TARGET_SIZE**2 + TARGET_SIZE**2)  # PCK@0.2 threshold
+                threshold_px = 0.2 * np.sqrt(TARGET_SIZE**2 + TARGET_SIZE**2)
                 print(f"  PCK@0.2 threshold: {threshold_px:.2f} pixels")
                 num_within_threshold = (euclidean_dist < threshold_px).sum()
                 print(f"  Keypoints within threshold: {num_within_threshold}/{num_kpts} ({num_within_threshold/num_kpts:.1%})")
-            
-            # If PCK=1.0, we expect very small differences (< 1 pixel)
             if pck_score is not None and pck_score >= 0.99:
                 if mean_dist > 5.0:
                     print(f"  ⚠️  WARNING: PCK={pck_score:.1%} but mean distance={mean_dist:.2f}px!")
                     print(f"     This indicates a visualization/coordinate bug, not a model accuracy issue.")
                 else:
                     print(f"  ✓ Coordinates match well (mean dist={mean_dist:.2f}px) - visualization should align")
-        
         print(f"{'='*80}\n")
-
     plt.tight_layout()
-
     if save_path:
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
         print(f"  → Saved: {save_path}")
     else:
         plt.show()
-
     plt.close()
-
-
 def visualize_from_checkpoint(args):
     """Run visualization on test images using trained checkpoint."""
-
     print("=" * 80)
     print("CAPE Pose Estimation Visualization")
     print("=" * 80)
@@ -480,25 +338,15 @@ def visualize_from_checkpoint(args):
     print(f"Output: {args.output_dir}")
     print("=" * 80)
     print()
-
-    # Create output directory
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Load model (uses saved training args from checkpoint)
     model, train_args = load_model(args.checkpoint)
-    
-    # Load checkpoint again to get epoch info for filename
     checkpoint = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
     checkpoint_epoch = checkpoint.get('epoch', 'unknown')
-    
     device = torch.device(args.device)
     model = model.to(device)
-    
     print(f"✓ Model loaded and moved to {device}")
     print(f"  Checkpoint epoch: {checkpoint_epoch}")
-    
-    # Show checkpoint validation metrics if available
     if 'val_pck' in checkpoint:
         val_pck = checkpoint.get('val_pck', 0.0)
         print(f"  Checkpoint validation PCK: {val_pck:.2%}")
@@ -515,83 +363,54 @@ def visualize_from_checkpoint(args):
             print(f"     Individual images may have different PCK scores.")
             if val_pck < 0.5:
                 print(f"  ⚠️  WARNING: Low validation PCK ({val_pck:.2%}) - this checkpoint may not be fully trained!")
-
-    # Load dataset (use training args for dataset config)
     print(f"\nLoading MP-100 dataset...")
-
-    # Update train_args with our dataset_root and split_id
     train_args.dataset_root = args.dataset_root
     train_args.mp100_split = args.split_id
-
-    # Handle single image path visualization (for overfitted models)
     if args.single_image_path:
         print(f"\n⚠️  Single image mode: {args.single_image_path}")
         print("   Using this SAME image as both support and query (for overfitting visualization)")
-        
-        # Try to load from train split first (where overfitted models are trained)
         try:
             dataset = build_mp100_cape('train', train_args)
             print(f"✓ Loaded train dataset: {len(dataset)} images")
         except:
             dataset = build_mp100_cape('test', train_args)
             print(f"✓ Loaded test dataset: {len(dataset)} images")
-        
-        # Normalize the image path
         single_image_path = Path(args.single_image_path)
         if not single_image_path.is_absolute():
             single_image_path = Path(args.dataset_root) / single_image_path
-        
-        # Try to find the image using COCO annotations (faster and more reliable)
         found_idx = None
         target_filename = single_image_path.name
         rel_path = str(single_image_path.relative_to(Path(args.dataset_root)))
-        
-        # Search through dataset IDs using COCO annotations
         coco = dataset.coco
         for img_id in dataset.ids:
             img_info = coco.loadImgs(img_id)[0]
             img_file = img_info['file_name']
-            
-            # Check if filename matches
             if img_file.endswith(target_filename) or img_file == rel_path or img_file.endswith(rel_path):
-                # Find the dataset index for this image ID
                 try:
                     idx = dataset.ids.index(img_id)
                     found_idx = idx
                     break
                 except ValueError:
                     continue
-        
         if found_idx is None:
             print(f"❌ Image not found in dataset by filename: {args.single_image_path}")
             print("   Trying to load via COCO annotations and mirror dataset preprocessing...")
-            # Try loading directly from file
             if single_image_path.exists():
-                # Load image and annotations manually, but **apply the same pipeline**
-                # as MP100CAPE: crop to bbox → resize to 512×512 → (optionally) normalize.
                 from PIL import Image as PILImage
                 import json
-                
-                # Find annotations for this image
                 ann_file = Path(train_args.dataset_root) / "annotations" / f"mp100_split{args.split_id}_train.json"
                 if not ann_file.exists():
                     ann_file = Path(train_args.dataset_root) / "annotations" / f"mp100_split{args.split_id}_test.json"
-                
                 if ann_file.exists():
                     with open(ann_file) as f:
                         ann_data = json.load(f)
-                    
-                    # Find image in annotations
                     rel_path = str(single_image_path.relative_to(Path(args.dataset_root)))
                     img_info = None
                     for img in ann_data['images']:
                         if img['file_name'] == rel_path or img['file_name'].endswith(single_image_path.name):
                             img_info = img
                             break
-                    
                     if img_info:
-                        # If this image ID exists in the built dataset, just reuse that
-                        # entry so we automatically get the *exact* same transforms.
                         if img_info['id'] in dataset.ids:
                             idx = dataset.ids.index(img_info['id'])
                             print(f"  ✓ Found matching image_id={img_info['id']} in dataset; "
@@ -599,43 +418,27 @@ def visualize_from_checkpoint(args):
                             support_data = dataset[idx]
                             query_data = support_data
                         else:
-                            # Fall back to a local reimplementation of the dataset pipeline
                             print("  ⚠️  image_id not found in dataset.ids; "
                                   "rebuilding preprocessing manually to match MP100CAPE.")
-                            
-                            # Load full image
                             img = PILImage.open(single_image_path).convert('RGB')
                             img_np = np.array(img)
-                            
-                            # Get first annotation for this image
                             anns = [a for a in ann_data['annotations'] if a['image_id'] == img_info['id']]
                             if not anns:
                                 print(f"❌ No annotations found for image id {img_info['id']} in COCO file.")
                                 return
                             ann = anns[0]
-                            
-                            # COCO bbox: [x, y, w, h]
                             bbox_x, bbox_y, bbox_w, bbox_h = ann['bbox']
                             bbox_x = max(0, int(bbox_x))
                             bbox_y = max(0, int(bbox_y))
                             bbox_w = max(1, int(bbox_w))
                             bbox_h = max(1, int(bbox_h))
-                            
-                            # Crop to person bbox (same as MP100CAPE.__getitem__)
                             img_cropped = img_np[bbox_y:bbox_y + bbox_h, bbox_x:bbox_x + bbox_w]
-                            
-                            # Extract keypoints and visibility
                             keypoints = np.array(ann['keypoints']).reshape(-1, 3)
                             num_kpts = keypoints.shape[0]
                             visibility = keypoints[:, 2].tolist()
-                            
-                            # Keypoints in bbox coordinates
                             kpts_xy = keypoints[:, :2].copy()
                             kpts_xy[:, 0] -= bbox_x
                             kpts_xy[:, 1] -= bbox_y
-                            
-                            # Apply the same deterministic resize used for val/test:
-                            # Albumentations Resize(height=512, width=512) with keypoints in 'xy' format.
                             try:
                                 import albumentations as A
                                 resize_transform = A.Compose(
@@ -646,7 +449,6 @@ def visualize_from_checkpoint(args):
                                 img_resized = transformed['image']
                                 kpts_resized = np.array(transformed['keypoints'], dtype=np.float32)
                             except ImportError:
-                                # Fallback: use simple cv2 resize and scale keypoints manually
                                 import cv2
                                 h0, w0 = img_cropped.shape[:2]
                                 img_resized = cv2.resize(
@@ -658,9 +460,6 @@ def visualize_from_checkpoint(args):
                                 kpts_resized = kpts_xy.copy().astype(np.float32)
                                 kpts_resized[:, 0] *= scale_x
                                 kpts_resized[:, 1] *= scale_y
-                            
-                            # Build a dataset-like record. Here keypoints are in PIXELS [0,512],
-                            # exactly like MP100CAPE after _apply_transforms().
                             support_data = {
                                 'image': img_resized,
                                 'keypoints': kpts_resized.tolist(),
@@ -673,10 +472,6 @@ def visualize_from_checkpoint(args):
                                 'bbox_height': TARGET_SIZE,
                             }
                             query_data = support_data
-                        
-                        # From here on, support_data/query_data have *training-aligned*
-                        # representations: 512×512 images and keypoints in the same
-                        # coordinate frame as the model.
                         query_image = query_data['image']
                         support_image = support_data['image']
                         support_coords = support_data['keypoints']
@@ -684,18 +479,13 @@ def visualize_from_checkpoint(args):
                         support_mask = torch.tensor([v > 0 for v in support_visibility], dtype=torch.float32)
                         skeleton_edges = support_data.get('skeleton', [])
                         query_gt_coords = query_data['keypoints']
-                        
-                        # Prepare tensors (normalized to [0,1] as during training)
                         if isinstance(query_image, PILImage.Image):
                             query_image_np = np.array(query_image)
                         else:
                             query_image_np = np.array(query_image)
                         query_image_tensor = torch.from_numpy(query_image_np).permute(2, 0, 1).unsqueeze(0).to(device).float() / 255.0
-                        
                         support_coords_tensor = torch.tensor(support_coords, dtype=torch.float32).unsqueeze(0).to(device)
                         support_mask_tensor = support_mask.unsqueeze(0).to(device)
-                        
-                        # Run inference
                         with torch.no_grad():
                             predictions = model.forward_inference(
                                 samples=query_image_tensor,
@@ -703,12 +493,8 @@ def visualize_from_checkpoint(args):
                                 support_mask=support_mask_tensor,
                                 skeleton_edges=[skeleton_edges]
                             )
-                        
-                        # Decode predictions
                         pred_tokens = predictions['sequences'][0].cpu()
                         pred_coords = predictions['coordinates'][0].cpu()
-                        
-                        # Create tokenizer for decoding
                         num_bins = int(np.sqrt(train_args.vocab_size))
                         from datasets.discrete_tokenizer import DiscreteTokenizer
                         tokenizer = DiscreteTokenizer(
@@ -716,14 +502,10 @@ def visualize_from_checkpoint(args):
                             seq_len=train_args.seq_len,
                             add_cls=getattr(train_args, 'add_cls_token', False)
                         )
-                        
-                        # Limit predictions to actual number of keypoints
                         max_kpts = len(query_gt_coords) if query_gt_coords else None
                         pred_keypoints = decode_sequence_to_keypoints(
                             pred_tokens, pred_coords, tokenizer, max_keypoints=max_kpts
                         )
-                        
-                        # Compute PCK in PIXEL space (512×512 frame)
                         pck_score = None
                         if query_gt_coords and len(pred_keypoints) > 0:
                             from util.eval_utils import compute_pck_bbox
@@ -733,18 +515,14 @@ def visualize_from_checkpoint(args):
                             pred_kpts_trimmed = np.array(pred_keypoints[:num_kpts])
                             gt_kpts_trimmed = np.array(query_gt_coords[:num_kpts])
                             vis_trimmed = support_visibility[:num_kpts]
-                            
-                            # Denormalize if needed (but our coords are already pixels 0–512)
                             if pred_kpts_trimmed.max() <= 1.0:
                                 pred_kpts_pixels = pred_kpts_trimmed * TARGET_SIZE
                             else:
                                 pred_kpts_pixels = pred_kpts_trimmed
-                            
                             if gt_kpts_trimmed.max() <= 1.0:
                                 gt_kpts_pixels = gt_kpts_trimmed * TARGET_SIZE
                             else:
                                 gt_kpts_pixels = gt_kpts_trimmed
-                            
                             pck_score, num_correct, num_visible = compute_pck_bbox(
                                 pred_keypoints=pred_kpts_pixels,
                                 gt_keypoints=gt_kpts_pixels,
@@ -754,11 +532,8 @@ def visualize_from_checkpoint(args):
                                 threshold=0.2,
                                 normalize_by='diagonal'
                             )
-                        
-                        # Visualize (include checkpoint epoch in filename to distinguish checkpoints)
                         vis_support_image = ensure_image_size(support_image, TARGET_SIZE)
                         vis_query_image = ensure_image_size(query_image, TARGET_SIZE)
-                        
                         save_path = output_dir / f"single_image_{single_image_path.stem}_epoch{checkpoint_epoch}.png"
                         visualize_pose_prediction(
                             support_image=vis_support_image,
@@ -770,32 +545,19 @@ def visualize_from_checkpoint(args):
                             save_path=save_path,
                             category_name=f"Single Image: {single_image_path.name}",
                             pck_score=pck_score,
-                            debug_coords=True  # Enable coordinate debugging
+                            debug_coords=True
                         )
-                        
                         print(f"\n✓ Visualization complete!")
                         print(f"  Saved to: {save_path}")
                         if pck_score is not None:
                             print(f"  PCK@0.2: {pck_score:.2%}")
                         return
-        
         if found_idx is not None:
-            # Load the found image as support
             support_data = dataset[found_idx]
             support_cat_id = support_data.get('category_id')
-            
-            # ========================================================================
-            # FOR OVERFITTING VISUALIZATION: Always use the SAME image as query
-            # ========================================================================
-            # When --single_image_path is provided, we want to visualize the model's
-            # predictions on the exact same image it was trained on. This shows how
-            # well the model memorized that specific image.
-            # ========================================================================
             print(f"  ⚠️  Single-image mode: Using SAME image as both support and query (overfitting visualization)")
             query_data = support_data
             query_idx = found_idx
-            
-            # Prepare inputs
             query_image = query_data['image']
             support_image = support_data['image']
             support_coords = support_data['keypoints']
@@ -803,17 +565,12 @@ def visualize_from_checkpoint(args):
             support_mask = torch.tensor([v > 0 for v in support_visibility], dtype=torch.float32)
             skeleton_edges = support_data.get('skeleton', [])
             query_gt_coords = query_data['keypoints']
-            
-            # Move to device and prepare for model
             if isinstance(query_image, torch.Tensor):
                 query_image_tensor = query_image.unsqueeze(0).to(device)
             else:
                 query_image_tensor = torch.from_numpy(np.array(query_image)).permute(2, 0, 1).unsqueeze(0).to(device).float()
-            
             support_coords_tensor = torch.tensor(support_coords, dtype=torch.float32).unsqueeze(0).to(device)
             support_mask_tensor = support_mask.unsqueeze(0).to(device)
-            
-            # Run inference
             with torch.no_grad():
                 predictions = model.forward_inference(
                     samples=query_image_tensor,
@@ -821,24 +578,14 @@ def visualize_from_checkpoint(args):
                     support_mask=support_mask_tensor,
                     skeleton_edges=[skeleton_edges]
                 )
-            
-            # Decode predictions
             pred_tokens = predictions['sequences'][0].cpu()
             pred_coords = predictions['coordinates'][0].cpu()
-            
             tokenizer = dataset.tokenizer
-            # Limit predictions to actual number of keypoints
             max_kpts = len(query_gt_coords) if query_gt_coords else None
             pred_keypoints = decode_sequence_to_keypoints(pred_tokens, pred_coords, tokenizer, max_keypoints=max_kpts)
-            
-            # Compute PCK
             pck_score = None
             if query_gt_coords and len(pred_keypoints) > 0:
                 from util.eval_utils import compute_pck_bbox
-                # CRITICAL FIX: compute_pck_bbox expects coordinates in PIXEL space, not normalized [0,1]
-                # We need to denormalize coordinates before passing to compute_pck_bbox
-                # Use resized image dimensions (width/height) for PCK threshold
-                # These are guaranteed to be 512×512 after resize, matching the coordinate normalization
                 bbox_w = query_data.get('width', query_data.get('bbox_width', TARGET_SIZE))
                 bbox_h = query_data.get('height', query_data.get('bbox_height', TARGET_SIZE))
                 num_kpts = min(len(pred_keypoints), len(query_gt_coords))
@@ -846,19 +593,14 @@ def visualize_from_checkpoint(args):
                 gt_kpts_trimmed = np.array(query_gt_coords[:num_kpts])
                 query_visibility = query_data.get('visibility', [1] * len(query_gt_coords))
                 vis_trimmed = query_visibility[:num_kpts]
-                
-                # Denormalize coordinates to pixel space for PCK computation
-                # Coordinates are normalized [0,1] relative to TARGET_SIZE (512)
                 if pred_kpts_trimmed.max() <= 1.0:
                     pred_kpts_pixels = pred_kpts_trimmed * TARGET_SIZE
                 else:
                     pred_kpts_pixels = pred_kpts_trimmed
-                
                 if gt_kpts_trimmed.max() <= 1.0:
                     gt_kpts_pixels = gt_kpts_trimmed * TARGET_SIZE
                 else:
                     gt_kpts_pixels = gt_kpts_trimmed
-                
                 pck_score, num_correct, num_visible = compute_pck_bbox(
                     pred_keypoints=pred_kpts_pixels,
                     gt_keypoints=gt_kpts_pixels,
@@ -868,26 +610,18 @@ def visualize_from_checkpoint(args):
                     threshold=0.2,
                     normalize_by='diagonal'
                 )
-            
-            # Convert images for visualization
-            # CRITICAL: Ensure images are 512x512 to match coordinate frame
             if isinstance(support_data['image'], torch.Tensor):
                 vis_support_image = support_data['image'].permute(1, 2, 0).numpy()
                 vis_support_image = (vis_support_image * 255).astype(np.uint8)
             else:
                 vis_support_image = np.array(support_data['image'])
-            
             if isinstance(query_data['image'], torch.Tensor):
                 vis_query_image = query_data['image'].permute(1, 2, 0).numpy()
                 vis_query_image = (vis_query_image * 255).astype(np.uint8)
             else:
                 vis_query_image = np.array(query_data['image'])
-            
-            # Ensure 512x512 size (should already be, but verify)
             vis_support_image = ensure_image_size(vis_support_image, TARGET_SIZE)
             vis_query_image = ensure_image_size(vis_query_image, TARGET_SIZE)
-            
-            # Visualize (include checkpoint epoch in filename to distinguish different checkpoints)
             save_path = output_dir / f"single_image_{single_image_path.stem}_epoch{checkpoint_epoch}.png"
             visualize_pose_prediction(
                 support_image=vis_support_image,
@@ -899,9 +633,8 @@ def visualize_from_checkpoint(args):
                 save_path=save_path,
                 category_name=f"Single Image: {single_image_path.name}",
                 pck_score=pck_score,
-                debug_coords=True  # Enable coordinate debugging
+                debug_coords=True
             )
-            
             print(f"\n✓ Visualization complete!")
             print(f"  Saved to: {save_path}")
             if pck_score is not None:
@@ -917,27 +650,17 @@ def visualize_from_checkpoint(args):
                     print(f"     Current checkpoint epoch: {checkpoint_epoch}")
                     print(f"     Check training logs to verify which checkpoint should be used.")
             return
-    
-    # Normal multi-image visualization
     dataset = build_mp100_cape('test', train_args)
     print(f"✓ Loaded {len(dataset)} test images")
-
-    # Get categories directly from dataset's COCO annotations
     from collections import defaultdict
-
-    # Load actual test categories from annotation file
     ann_file = Path(train_args.dataset_root) / "annotations" / f"mp100_split{args.split_id}_test.json"
     with open(ann_file) as f:
         test_ann_data = json.load(f)
         test_categories_info = {cat['id']: cat['name'] for cat in test_ann_data['categories']}
-
     test_categories = list(test_categories_info.keys())
-
-    # Filter to specific categories if requested
     if args.categories is not None:
         test_categories = [c for c in test_categories if c in args.categories]
         print(f"\n⚠️  Filtering to {len(test_categories)} requested categories: {args.categories}")
-
     print(f"\nTest categories to visualize: {len(test_categories)}")
     if len(test_categories) <= 10:
         print(f"Categories: {[test_categories_info.get(c, c) for c in test_categories]}")
@@ -945,49 +668,29 @@ def visualize_from_checkpoint(args):
         print(f"Categories (showing first 10): {[test_categories_info.get(c, c) for c in test_categories[:10]]}...")
     print(f"Samples per category: {args.num_samples}")
     print()
-
-    # OPTIMIZATION: Get category info directly from COCO annotations instead of loading all images
-    # This avoids slow GCS file access when iterating through thousands of images
     print("Grouping images by category from annotations (fast method)...")
     category_samples = defaultdict(list)
-    
-    # Use COCO annotations directly to get image->category mapping
-    # This is much faster than loading each image from GCS
     coco = dataset.coco
     for idx, img_id in enumerate(dataset.ids):
-        # Get annotations for this image
         ann_ids = coco.getAnnIds(imgIds=img_id)
         if len(ann_ids) == 0:
             continue
-        
         anns = coco.loadAnns(ann_ids)
-        # Get category from first annotation (we use first instance per image)
         if len(anns) > 0 and 'category_id' in anns[0]:
             cat_id = anns[0]['category_id']
-            
-            # Filter to requested categories
             if args.categories is not None and cat_id not in args.categories:
                 continue
-            
             category_samples[cat_id].append(idx)
-    
     total_images = sum(len(indices) for indices in category_samples.values())
     print(f"✓ Grouped {total_images} images into {len(category_samples)} categories")
-
-    # Visualize samples
     total_visualized = 0
-
     for cat_id, sample_indices in category_samples.items():
         cat_name = test_categories_info.get(cat_id, f"cat_{cat_id}")
         print(f"\nCategory: {cat_name} (ID: {cat_id})")
-
-        # Get support data (first example in category as template)
-        # This must be done before selecting query samples
         try:
             support_idx = sample_indices[0]
             support_data = dataset[support_idx]
         except ImageNotFoundError:
-            # Try to find a valid support example
             support_data = None
             for alt_support_idx in sample_indices:
                 try:
@@ -999,99 +702,59 @@ def visualize_from_checkpoint(args):
             if support_data is None:
                 print(f"  Skipping category {cat_name} (no valid support image)")
                 continue
-
-        # Take up to num_samples per category, but skip the support image
-        # Start from index 1 to avoid visualizing the same image as support
         query_samples = sample_indices[1:1+args.num_samples] if len(sample_indices) > 1 else []
-        
         if len(query_samples) == 0:
             print(f"  Skipping category {cat_name} (only 1 image, need at least 2 for support+query)")
             continue
-        
         for sample_idx in query_samples:
             try:
                 data = dataset[sample_idx]
             except ImageNotFoundError:
                 print(f"  Skipping sample {sample_idx} (image not found)")
                 continue
-
-            # Support data is already loaded above (before the loop)
-            # No need to check if same as support since we skip it in query_samples
-
-            # Prepare inputs
             query_image = data['image']
             support_image = support_data['image']
-            
-            # Support keypoints and skeleton (ground truth from support image)
-            support_coords = support_data['keypoints']  # Normalized [0,1] coordinates
+            support_coords = support_data['keypoints']
             support_visibility = data.get('visibility', [1] * len(support_coords))
             support_mask = torch.tensor([v > 0 for v in support_visibility], dtype=torch.float32)
             skeleton_edges = support_data.get('skeleton', [])
-            
-            # Query ground truth (for PCK computation, NOT passed to model)
-            query_gt_coords = data['keypoints']  # Normalized [0,1] coordinates
+            query_gt_coords = data['keypoints']
             query_visibility = data.get('visibility', [1] * len(query_gt_coords))
-
-            # Move to device and prepare for model
             if isinstance(query_image, torch.Tensor):
                 query_image_tensor = query_image.unsqueeze(0).to(device)
             else:
                 query_image_tensor = torch.from_numpy(np.array(query_image)).permute(2, 0, 1).unsqueeze(0).to(device).float()
-
             support_coords_tensor = torch.tensor(support_coords, dtype=torch.float32).unsqueeze(0).to(device)
             support_mask_tensor = support_mask.unsqueeze(0).to(device)
-
-            # Run inference with skeleton edges (CRITICAL FIX)
             with torch.no_grad():
                 predictions = model.forward_inference(
                     samples=query_image_tensor,
                     support_coords=support_coords_tensor,
                     support_mask=support_mask_tensor,
-                    skeleton_edges=[skeleton_edges]  # FIXED: Now passing skeleton structure!
+                    skeleton_edges=[skeleton_edges]
                 )
-
-            # Decode predictions
             pred_tokens = predictions['sequences'][0].cpu()
             pred_coords = predictions['coordinates'][0].cpu()
-
-            # Extract keypoints from sequence
             tokenizer = dataset.tokenizer
-            # Limit predictions to actual number of keypoints
             max_kpts = len(query_gt_coords) if query_gt_coords else None
             pred_keypoints = decode_sequence_to_keypoints(pred_tokens, pred_coords, tokenizer, max_keypoints=max_kpts)
-
-            # Compute PCK if we have ground truth
             pck_score = None
             if query_gt_coords and len(pred_keypoints) > 0:
                 from util.eval_utils import compute_pck_bbox
-                
-                # CRITICAL FIX: compute_pck_bbox expects coordinates in PIXEL space, not normalized [0,1]
-                # Denormalize coordinates before passing to compute_pck_bbox
-                # Get bbox dimensions for normalization
-                # Use resized image dimensions (width/height) for PCK threshold
-                # These are guaranteed to be 512×512 after resize, matching the coordinate normalization
                 bbox_w = data.get('width', data.get('bbox_width', TARGET_SIZE))
                 bbox_h = data.get('height', data.get('bbox_height', TARGET_SIZE))
-                
-                # Trim to actual number of keypoints for this category
                 num_kpts = min(len(pred_keypoints), len(query_gt_coords))
                 pred_kpts_trimmed = np.array(pred_keypoints[:num_kpts])
                 gt_kpts_trimmed = np.array(query_gt_coords[:num_kpts])
                 vis_trimmed = query_visibility[:num_kpts]
-                
-                # Denormalize coordinates to pixel space for PCK computation
-                # Coordinates are normalized [0,1] relative to TARGET_SIZE (512)
                 if pred_kpts_trimmed.max() <= 1.0:
                     pred_kpts_pixels = pred_kpts_trimmed * TARGET_SIZE
                 else:
                     pred_kpts_pixels = pred_kpts_trimmed
-                
                 if gt_kpts_trimmed.max() <= 1.0:
                     gt_kpts_pixels = gt_kpts_trimmed * TARGET_SIZE
                 else:
                     gt_kpts_pixels = gt_kpts_trimmed
-                
-                # Compute PCK
                 pck_score, num_correct, num_visible = compute_pck_bbox(
                     pred_keypoints=pred_kpts_pixels,
                     gt_keypoints=gt_kpts_pixels,
@@ -1101,26 +764,18 @@ def visualize_from_checkpoint(args):
                     threshold=0.2,
                     normalize_by='diagonal'
                 )
-
-            # Convert images for visualization
-            # CRITICAL: Ensure images are 512x512 to match coordinate frame
             if isinstance(support_data['image'], torch.Tensor):
                 vis_support_image = support_data['image'].permute(1, 2, 0).numpy()
                 vis_support_image = (vis_support_image * 255).astype(np.uint8)
             else:
                 vis_support_image = np.array(support_data['image'])
-            
             if isinstance(data['image'], torch.Tensor):
                 vis_query_image = data['image'].permute(1, 2, 0).numpy()
                 vis_query_image = (vis_query_image * 255).astype(np.uint8)
             else:
                 vis_query_image = np.array(data['image'])
-
-            # Ensure 512x512 size (should already be, but verify)
             vis_support_image = ensure_image_size(vis_support_image, TARGET_SIZE)
             vis_query_image = ensure_image_size(vis_query_image, TARGET_SIZE)
-
-            # Visualize with both images
             save_path = output_dir / f"{cat_name}_query{sample_idx}_support{support_idx}.png"
             visualize_pose_prediction(
                 support_image=vis_support_image,
@@ -1132,13 +787,11 @@ def visualize_from_checkpoint(args):
                 save_path=save_path,
                 category_name=cat_name,
                 pck_score=pck_score,
-                debug_coords=(pck_score is not None and pck_score >= 0.99)  # Debug if PCK is high
+                debug_coords=(pck_score is not None and pck_score >= 0.99)
             )
-
             pck_str = f" | PCK: {pck_score:.2%}" if pck_score is not None else ""
             print(f"  Sample {sample_idx}: {len(pred_keypoints)} keypoints predicted{pck_str}")
             total_visualized += 1
-
     print()
     print("=" * 80)
     print(f"✓ Visualization Complete!")
@@ -1152,49 +805,32 @@ def visualize_from_checkpoint(args):
     print(f"  - Panel 3 (Predicted):    Query image with predicted keypoints (red X marks)")
     print(f"  - PCK@0.2 score shown in title for each prediction")
     print("=" * 80)
-
-
 def main():
     parser = argparse.ArgumentParser(
         description='Visualize CAPE Pose Predictions on Test Images',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Visualize using best PCK checkpoint
   python visualize_cape_predictions.py \\
       --checkpoint outputs/cape_run/checkpoint_best_pck_*.pth \\
       --device mps \\
       --num_samples 5
-
-  # Visualize specific epoch
   python visualize_cape_predictions.py \\
       --checkpoint outputs/cape_run/checkpoint_e050_*.pth \\
       --dataset_root . \\
       --output_dir visualizations/epoch_50
         """
     )
-
-    # ========================================================================
-    # Model Loading (Primary Arguments)
-    # ========================================================================
     parser.add_argument('--checkpoint', required=True,
                        help='Path to trained CAPE checkpoint (.pth file). '
                             'Can be any checkpoint: checkpoint_e***, checkpoint_best_pck_*, etc.')
     parser.add_argument('--device', default='cpu', 
                        choices=['cpu', 'cuda', 'mps'],
                        help='Device for inference (default: cpu)')
-
-    # ========================================================================
-    # Dataset Configuration
-    # ========================================================================
     parser.add_argument('--dataset_root', default='.', 
                        help='Path to MP-100 dataset root directory (default: current directory)')
     parser.add_argument('--split_id', type=int, default=1, 
                        help='MP-100 split ID (1-5). Must match the split used during training.')
-
-    # ========================================================================
-    # Visualization Options
-    # ========================================================================
     parser.add_argument('--num_samples', type=int, default=3, 
                        help='Number of samples to visualize per category (default: 3)')
     parser.add_argument('--output_dir', default='visualizations', 
@@ -1206,18 +842,7 @@ Examples:
                        help='Path to a specific image to visualize (for overfitted models). '
                             'If provided, this image will be used as both support and query. '
                             'Example: --single_image_path data/camel_face/camel_133.jpg')
-
-    # ========================================================================
-    # Note: Model architecture parameters are loaded from checkpoint
-    # ========================================================================
-    # The checkpoint contains 'args' with all training hyperparameters.
-    # We don't need to specify them here; they're automatically restored.
-    # ========================================================================
-
     args = parser.parse_args()
-
     visualize_from_checkpoint(args)
-
-
 if __name__ == '__main__':
     main()
