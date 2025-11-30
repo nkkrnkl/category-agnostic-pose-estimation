@@ -4,15 +4,139 @@ This repository implements **Category-Agnostic Pose Estimation (CAPE)** using a 
 
 ## Table of Contents
 
+- [How to Run](#how-to-run) ⭐ **Start here for execution instructions**
+- [Dependencies](#dependencies)
+- [Code Structure](#code-structure)
 - [Overview](#overview)
-- [Project Structure](#project-structure)
-- [Key Components](#key-components)
 - [Installation](#installation)
-- [Quick Start](#quick-start)
 - [Training](#training)
 - [Evaluation](#evaluation)
 - [Configuration](#configuration)
 - [File Descriptions](#file-descriptions)
+
+---
+
+## How to Run ⭐
+
+### Training
+
+**Basic training command:**
+```bash
+python models/train_cape_episodic.py \
+    --use_geometric_encoder \
+    --use_gcn_preenc \
+    --dataset_root . \
+    --output_dir outputs/cape_training \
+    --epochs 300 \
+    --batch_size 2 \
+    --accumulation_steps 4 \
+    --mp100_split 1
+```
+
+**Key files for training:**
+- **Main script**: `models/train_cape_episodic.py` - Run this to start training
+- **Configuration**: `category_splits.json` - Defines train/val/test categories
+- **Output**: Checkpoints saved to `--output_dir` (default: `outputs/cape_training/`)
+
+**Quick test (1 epoch):**
+```bash
+python models/train_cape_episodic.py \
+    --use_geometric_encoder \
+    --use_gcn_preenc \
+    --dataset_root . \
+    --output_dir outputs/test_run \
+    --epochs 1 \
+    --mp100_split 1 \
+    --batch_size 10 \
+    --episodes_per_epoch 500
+```
+
+### Evaluation
+
+**1-shot evaluation:**
+```bash
+python scripts/eval_cape_checkpoint.py \
+    --checkpoint outputs/cape_training/checkpoint_best_pck_*.pth \
+    --split test \
+    --num-support-per-episode 1 \
+    --dataset-root . \
+    --output-dir outputs/eval_1shot
+```
+
+**5-shot evaluation:**
+```bash
+python scripts/eval_cape_checkpoint.py \
+    --checkpoint outputs/cape_training/checkpoint_best_pck_*.pth \
+    --split test \
+    --num-support-per-episode 5 \
+    --dataset-root . \
+    --output-dir outputs/eval_5shot
+```
+
+**Key files for evaluation:**
+- **Main script**: `scripts/eval_cape_checkpoint.py` - Run this to evaluate a checkpoint
+- **Output**: Metrics saved to `--output-dir` as `metrics_test.json` and visualizations in `visualizations/` folder
+
+---
+
+## Dependencies
+
+### Installation
+
+Install all required dependencies:
+
+```bash
+pip install -r requirements_cape.txt
+```
+
+### Required Libraries and Versions
+
+All dependencies with specific versions are listed in `requirements_cape.txt`. Key libraries include:
+
+| Library | Minimum Version | Purpose |
+|---------|----------------|---------|
+| `torch` | >= 2.0.0 | Deep learning framework |
+| `torchvision` | >= 0.15.0 | Image processing utilities |
+| `numpy` | >= 1.24.0 | Numerical computations |
+| `scipy` | >= 1.10.0 | Scientific computing |
+| `pycocotools` | >= 2.0.6 | COCO dataset format support |
+| `opencv-python` | >= 4.7.0 | Image I/O and processing |
+| `albumentations` | >= 1.3.0 | Data augmentation |
+| `matplotlib` | >= 3.7.0 | Visualization |
+| `tqdm` | >= 4.65.0 | Progress bars |
+
+**Note**: For detectron2, install separately based on your CUDA version:
+```bash
+pip install detectron2 -f https://dl.fbaipublicfiles.com/detectron2/wheels/cu118/torch2.0/index.html
+```
+
+See `requirements_cape.txt` for the complete list with exact version specifications.
+
+---
+
+## Code Structure
+
+### Main Entry Points
+
+| File | Purpose | How to Run |
+|------|---------|------------|
+| `models/train_cape_episodic.py` | **Training script** | `python models/train_cape_episodic.py [args]` |
+| `scripts/eval_cape_checkpoint.py` | **Evaluation script** | `python scripts/eval_cape_checkpoint.py --checkpoint [path] [args]` |
+| `train_mp100_cape_cola.ipynb` | **Colab notebook** | Open in Google Colab and run cells sequentially |
+
+### Core Components
+
+| Directory/File | Purpose |
+|----------------|---------|
+| `models/train_cape_episodic.py` | Main training script - run this to train the model |
+| `models/cape_model.py` | CAPE model wrapper combining base model + support encoder |
+| `models/geometric_support_encoder.py` | Geometric encoder for support keypoints |
+| `models/engine_cape.py` | Training and evaluation engine |
+| `scripts/eval_cape_checkpoint.py` | Evaluation script - run this to evaluate a trained checkpoint |
+| `datasets/mp100_cape.py` | MP-100 dataset loader |
+| `datasets/episodic_sampler.py` | Episodic sampling for 1-shot/5-shot learning |
+| `util/eval_utils.py` | PCK evaluation utilities |
+| `category_splits.json` | Train/val/test category splits configuration |
 
 ---
 
@@ -33,38 +157,6 @@ This repository implements **Category-Agnostic Pose Estimation (CAPE)** using a 
 - **PCK@0.2 evaluation**: Standard pose estimation metric
 
 ---
-
-## Project Structure
-
-```
-category-agnostic-pose-estimation/
-├── models/                      # Model architecture files
-│   ├── train_cape_episodic.py   # Main training script
-│   ├── cape_model.py            # CAPE model wrapper
-│   ├── geometric_support_encoder.py  # Geometric encoder
-│   ├── roomformer_v2.py         # Base Raster2Seq model
-│   ├── engine_cape.py            # Training/evaluation engine
-│   ├── backbone.py               # ResNet backbone
-│   └── ...                       # Supporting model files
-│
-├── datasets/                     # Dataset and data loading
-│   ├── mp100_cape.py             # MP-100 dataset loader
-│   ├── episodic_sampler.py       # Episodic sampling (1-shot/5-shot)
-│   ├── discrete_tokenizer.py     # Sequence tokenizer
-│   └── ...                       # Supporting dataset files
-│
-├── scripts/                      # Utility scripts
-│   ├── eval_cape_checkpoint.py   # Evaluation script
-│   └── ...                       # Visualization scripts
-│
-├── util/                         # Utility functions
-│   ├── eval_utils.py             # PCK evaluation
-│   └── ...                       # Other utilities
-│
-├── category_splits.json          # Train/val/test category splits
-├── requirements_cape.txt         # Python dependencies
-└── README.md                     # This file
-```
 
 ---
 
@@ -88,21 +180,6 @@ category-agnostic-pose-estimation/
 ---
 
 ## Installation
-
-### Requirements
-
-```bash
-pip install -r requirements_cape.txt
-```
-
-### Key Dependencies
-
-- PyTorch >= 2.0.0
-- torchvision >= 0.15.0
-- numpy, scipy
-- pycocotools
-- opencv-python
-- matplotlib
 
 ### Dataset Setup
 
