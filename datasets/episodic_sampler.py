@@ -123,7 +123,7 @@ class EpisodicDataset(data.Dataset):
     """
     def __init__(self, base_dataset, category_split_file, split='train',
                  num_queries_per_episode=2, num_support_per_episode=1, episodes_per_epoch=1000, seed=None,
-                 debug_single_image=None, debug_single_image_category=None):
+                 fixed_episodes=False, load_support_images=True):
         """
         Initialize episodic dataset.
         
@@ -135,30 +135,41 @@ class EpisodicDataset(data.Dataset):
             num_support_per_episode: Number of support images per episode
             episodes_per_epoch: Number of episodes per training epoch
             seed: Random seed
-            debug_single_image: Optional image index for single-image debug mode
-            debug_single_image_category: Optional category ID for single-image debug mode
+            fixed_episodes: If True, pre-generate episodes once and reuse (for stable val)
+            load_support_images: If True, load support images (for visualization).
+                                If False, skip loading to save I/O, CPU, and memory.
+                                The model only uses support_coords, not support images.
         """
         self.base_dataset = base_dataset
         self.episodes_per_epoch = episodes_per_epoch
         self.num_support = num_support_per_episode
-        self.debug_single_image = debug_single_image
-        self.debug_single_image_category = debug_single_image_category
-        if self.debug_single_image is not None:
-            print(f"⚠️  SINGLE IMAGE MODE: Using image index {self.debug_single_image} from category {self.debug_single_image_category}")
-            print(f"   Same image will be used as both support and query (self-supervised)")
-            self.sampler = None
+        self.fixed_episodes = fixed_episodes
+        self.load_support_images = load_support_images
+        self._cached_episodes = None  # Will store pre-generated episodes if fixed_episodes=True
+
+        # Create episodic sampler
+        self.sampler = EpisodicSampler(
+            base_dataset,
+            category_split_file,
+            split=split,
+            num_queries_per_episode=num_queries_per_episode,
+            num_support_per_episode=num_support_per_episode,
+            seed=seed
+        )
+
+        # Pre-generate episodes if using fixed mode
+        if self.fixed_episodes:
+            print(f"EpisodicDataset: Pre-generating {episodes_per_epoch} fixed episodes "
+                  f"for {split} split (stable curves)...")
+            self._cached_episodes = []
+            for _ in range(episodes_per_epoch):
+                episode = self.sampler.sample_episode()
+                self._cached_episodes.append(episode)
+            print(f"✓ Cached {len(self._cached_episodes)} episodes")
         else:
-            self.sampler = EpisodicSampler(
-                base_dataset,
-                category_split_file,
-                split=split,
-                num_queries_per_episode=num_queries_per_episode,
-                num_support_per_episode=num_support_per_episode,
-                seed=seed
-            )
-        print(f"EpisodicDataset: {episodes_per_epoch} episodes/epoch, "
-              f"{num_support_per_episode}-shot ({num_support_per_episode} support), "
-              f"{num_queries_per_episode} queries/episode")
+            print(f"EpisodicDataset: {episodes_per_epoch} episodes/epoch, "
+                  f"{num_support_per_episode}-shot ({num_support_per_episode} support), "
+                  f"{num_queries_per_episode} queries/episode")
     def __len__(self):
         return self.episodes_per_epoch
     def __getitem__(self, idx):
@@ -220,9 +231,26 @@ class EpisodicDataset(data.Dataset):
             }
         max_retries = 100
         retry_count = 0
+        
+        # Track if we're using fixed episodes
+        use_fixed = self.fixed_episodes and self._cached_episodes is not None
+        
         while retry_count < max_retries:
             try:
-                episode = self.sampler.sample_episode()
+                # Sample episode
+                # CRITICAL FIX: On retry (count > 0), fall back to random sampling
+                # because the fixed episode at 'idx' is evidently broken/missing
+                if use_fixed and retry_count == 0:
+                    # First attempt: use the cached fixed episode
+                    episode = self._cached_episodes[idx % len(self._cached_episodes)]
+                else:
+                    # Retry OR random mode: sample a new random episode
+                    if retry_count == 1 and use_fixed:
+                        print(f"⚠️  Fixed episode {idx} failed (missing image). "
+                              f"Falling back to random sampling.")
+                    episode = self.sampler.sample_episode()
+
+                # Load support images (support multiple supports per episode)
                 support_data_list = []
                 support_coords_list = []
                 support_masks_list = []
@@ -234,6 +262,8 @@ class EpisodicDataset(data.Dataset):
                     h, w = support_data['height'], support_data['width']
                     support_coords[:, 0] /= w
                     support_coords[:, 1] /= h
+                    # Clamp coordinates to [0, 1] after augmentation
+                    support_coords = support_coords.clamp(0.0, 1.0)
                     if 'visibility' not in support_data:
                         raise KeyError(
                             f"Support data for image {support_data.get('image_id', 'unknown')} "
@@ -245,8 +275,9 @@ class EpisodicDataset(data.Dataset):
                             f"Support visibility length ({len(support_visibility)}) doesn't match "
                             f"keypoints length ({len(support_coords)}) for image {support_data.get('image_id', 'unknown')}"
                         )
+                    # Mask convention: True=ignore, False=use
                     support_mask = torch.tensor(
-                        [v > 0 for v in support_visibility], 
+                        [v == 0 for v in support_visibility], 
                         dtype=torch.bool
                     )
                     support_skeleton = support_data.get('skeleton', [])
@@ -254,6 +285,8 @@ class EpisodicDataset(data.Dataset):
                     support_masks_list.append(support_mask)
                     support_skeletons_list.append(support_skeleton)
                 first_support = support_data_list[0]
+
+                # Load query images
                 query_images = []
                 query_targets = []
                 query_metadata = []
@@ -302,17 +335,25 @@ class EpisodicDataset(data.Dataset):
                         print(f"  Image ID: {query_data['image_id']}")
                         print(f"  Original bbox_width: {bbox_w}")
                         print(f"  Original bbox_height: {bbox_h}")
-                support_images = [sd['image'] for sd in support_data_list]
+                
+                # PERFORMANCE OPTIMIZATION: Skip support images if not needed
+                # The model only uses support_coords and support_mask (geometry).
+                # Support images are only needed for visualization (eval script).
+                if self.load_support_images:
+                    support_images = [sd['image'] for sd in support_data_list]
+                else:
+                    support_images = [None] * len(support_data_list)
+                
                 return {
                     'support_images': support_images,
                     'support_coords': support_coords_list,
                     'support_masks': support_masks_list,
                     'support_skeletons': support_skeletons_list,
                     'support_metadata': {
-                        'image_id': first_support['image_id'],
-                        'category_id': first_support['category_id'],
-                        'bbox_width': first_support.get('bbox_width', first_support['width']),
-                        'bbox_height': first_support.get('bbox_height', first_support['height']),
+                        'image_id': first_support.get('image_id'),
+                        'category_id': first_support.get('category_id'),
+                        'bbox_width': first_support.get('bbox_width', first_support.get('width')),
+                        'bbox_height': first_support.get('bbox_height', first_support.get('height')),
                     },
                     'query_images': query_images,
                     'query_targets': query_targets,
@@ -355,7 +396,15 @@ def episodic_collate_fn(batch):
         query_targets_list.extend(episode['query_targets'])
         query_metadata_list.extend(episode['query_metadata'])
         category_ids.append(episode['category_id'])
-    support_images = torch.stack(support_images_all)
+    
+    # Stack support images (if they exist - may be None for training optimization)
+    # When load_support_images=False, support_images are None to save I/O.
+    if support_images_all and support_images_all[0] is not None:
+        support_images = torch.stack(support_images_all)
+    else:
+        support_images = None
+    
+    # Pad support coordinates to max length in batch
     max_support_kpts = max(coords.shape[0] for coords in support_coords_all)
     support_coords_padded = []
     support_masks_padded = []
@@ -373,21 +422,42 @@ def episodic_collate_fn(batch):
     batched_seq_data = {}
     for key in query_targets_list[0].keys():
         batched_seq_data[key] = torch.stack([qt[key] for qt in query_targets_list])
+    
+    # ========================================================================
+    # CRITICAL FIX: Align support and query dimensions for multi-shot learning
+    # ========================================================================
+    # Aggregate multiple supports per episode (mean for coords, any for masks)
+    # Then repeat each aggregated support K times (once per query in that episode)
+    # ========================================================================
     num_episodes = len(batch)
     num_total_queries = len(query_images_list)
     queries_per_episode = num_total_queries // num_episodes
+    
+    # Aggregate multiple supports: reshape to (B, num_support, max_kpts, 2)
     support_coords_reshaped = support_coords.view(num_episodes, num_support_per_episode, max_support_kpts, 2)
-    support_coords_aggregated = support_coords_reshaped.mean(dim=1)
+    support_coords_aggregated = support_coords_reshaped.mean(dim=1)  # (B, max_kpts, 2)
     support_masks_reshaped = support_masks.view(num_episodes, num_support_per_episode, max_support_kpts)
-    support_masks_aggregated = support_masks_reshaped.any(dim=1)
-    support_images_reshaped = support_images.view(num_episodes, num_support_per_episode, *support_images.shape[1:])
-    support_images_aggregated = support_images_reshaped[:, 0]
+    support_masks_aggregated = support_masks_reshaped.any(dim=1)  # (B, max_kpts)
+    
+    # Handle support images (may be None if load_support_images=False)
+    if support_images_all and support_images_all[0] is not None:
+        support_images = torch.stack(support_images_all)
+        support_images_reshaped = support_images.view(num_episodes, num_support_per_episode, *support_images.shape[1:])
+        support_images_aggregated = support_images_reshaped[:, 0]  # Use first support image
+        support_images = support_images_aggregated.repeat_interleave(queries_per_episode, dim=0)
+    else:
+        support_images = None
+    
+    # Repeat aggregated supports K times (once per query)
     support_coords = support_coords_aggregated.repeat_interleave(queries_per_episode, dim=0)
     support_masks = support_masks_aggregated.repeat_interleave(queries_per_episode, dim=0)
-    support_images = support_images_aggregated.repeat_interleave(queries_per_episode, dim=0)
+    
+    # Aggregate skeletons (use first support's skeleton)
     support_skeletons_aggregated = []
     for i in range(num_episodes):
         support_skeletons_aggregated.append(support_skeletons_all[i * num_support_per_episode])
+    
+    # Repeat support metadata (list) K times
     support_metadata_repeated = []
     for i in range(num_episodes):
         meta = support_metadata_list[i * num_support_per_episode]
@@ -411,7 +481,7 @@ def episodic_collate_fn(batch):
 def build_episodic_dataloader(base_dataset, category_split_file, split='train',
                               batch_size=2, num_queries_per_episode=2, num_support_per_episode=1,
                               episodes_per_epoch=1000, num_workers=16, seed=None,
-                              debug_single_image=None, debug_single_image_category=None):
+                              fixed_episodes=False, load_support_images=True):
     """
     Build episodic dataloader for CAPE training/validation/testing.
     
@@ -425,9 +495,10 @@ def build_episodic_dataloader(base_dataset, category_split_file, split='train',
         episodes_per_epoch: Total episodes per epoch
         num_workers: Number of worker processes
         seed: Random seed
-        debug_single_image: Optional image index for single-image debug mode
-        debug_single_image_category: Optional category ID for single-image debug mode
-    
+        fixed_episodes: If True, pre-generate episodes once and reuse (for stable val curves)
+        load_support_images: If True, load support images (needed for visualization).
+                            If False, skip to save I/O, CPU, and GPU memory.
+                            The model only uses support_coords, not images.
     Returns:
         dataloader: DataLoader with episodic sampling
     """
@@ -439,8 +510,8 @@ def build_episodic_dataloader(base_dataset, category_split_file, split='train',
         num_support_per_episode=num_support_per_episode,
         episodes_per_epoch=episodes_per_epoch,
         seed=seed,
-        debug_single_image=debug_single_image,
-        debug_single_image_category=debug_single_image_category
+        fixed_episodes=fixed_episodes,
+        load_support_images=load_support_images
     )
     dataloader = data.DataLoader(
         episodic_dataset,
