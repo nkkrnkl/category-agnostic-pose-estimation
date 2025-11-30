@@ -112,18 +112,22 @@ def get_args_parser():
                        help='Random seed for reproducible evaluation (default: 123)')
     parser.add_argument('--num-queries-per-episode', default=None, type=int,
                        help='Queries per episode (None = use checkpoint default)')
-    parser.add_argument('--num-support-per-episode', default=1, type=int,
-                       help='Number of support images per episode (for 1-shot, 5-shot, etc.)')
     parser.add_argument('--pck-threshold', default=0.2, type=float,
                        help='PCK threshold (fraction of bbox diagonal)')
     
     # Visualization arguments
     parser.add_argument('--num-visualizations', default=50, type=int,
-                       help='Maximum number of examples to visualize')
+                       help='Maximum number of examples to visualize (0 = no limit, use per-category)')
+    parser.add_argument('--min-vis-per-category', default=10, type=int,
+                       help='Minimum number of visualizations per category')
+    parser.add_argument('--visualize-top-pck', action='store_true',
+                       help='Visualize images with highest PCK per category (instead of random)')
     parser.add_argument('--draw-skeleton', action='store_true',
                        help='Draw skeleton edges if available')
     parser.add_argument('--save-all-queries', action='store_true',
                        help='Save all queries in episode (default: only first per episode)')
+    parser.add_argument('--organize-by-category', action='store_true', default=True,
+                       help='Organize visualizations in category subdirectories')
     
     # Output arguments
     parser.add_argument('--output-dir', default='outputs/cape_eval', type=str,
@@ -173,6 +177,20 @@ def load_checkpoint_and_model(checkpoint_path: str, device: torch.device) -> Tup
     
     # Get training args from checkpoint
     args = checkpoint['args']
+    
+    # ========================================================================
+    # CRITICAL: Override dataset_root for local evaluation
+    # ========================================================================
+    # Checkpoints trained on Colab have paths like /content/category-agnostic-pose-estimation
+    # We need to use the local workspace path instead
+    local_workspace = Path(__file__).resolve().parent.parent  # scripts/ -> project root
+    if hasattr(args, 'dataset_root') and '/content/' in str(args.dataset_root):
+        old_path = args.dataset_root
+        args.dataset_root = str(local_workspace)
+        print(f"  ⚠️  Overriding Colab dataset_root:")
+        print(f"     Old: {old_path}")
+        print(f"     New: {args.dataset_root}")
+    
     print(f"  Epoch: {checkpoint.get('epoch', '?')}")
     print(f"  Best PCK: {checkpoint.get('best_pck', 'N/A')}")
     print()
@@ -239,7 +257,7 @@ def load_checkpoint_and_model(checkpoint_path: str, device: torch.device) -> Tup
 
 def build_dataloader(args: argparse.Namespace, split: str, num_workers: int,
                      num_episodes: int = None, num_queries: int = None,
-                     num_support: int = None, eval_seed: int = 123, full_split: bool = False) -> DataLoader:
+                     eval_seed: int = 123, full_split: bool = False) -> DataLoader:
     """
     Build episodic dataloader for evaluation.
     
@@ -267,8 +285,6 @@ def build_dataloader(args: argparse.Namespace, split: str, num_workers: int,
     # Use checkpoint values or override
     if num_queries is None:
         num_queries = getattr(args, 'num_queries_per_episode', 2)
-    if num_support is None:
-        num_support = getattr(args, 'num_support_per_episode', 1)
     
     # Handle full_split mode: evaluate ALL images in the split
     if full_split:
@@ -295,7 +311,6 @@ def build_dataloader(args: argparse.Namespace, split: str, num_workers: int,
         split=split,
         batch_size=1,  # Process one episode at a time for visualization
         num_queries_per_episode=num_queries,
-        num_support_per_episode=num_support,
         episodes_per_epoch=num_episodes,
         num_workers=num_workers,
         seed=eval_seed,  # Deterministic evaluation with configurable seed
@@ -304,7 +319,6 @@ def build_dataloader(args: argparse.Namespace, split: str, num_workers: int,
     
     print(f"✓ Episodic dataloader:")
     print(f"  Episodes per epoch: {num_episodes}")
-    print(f"  Support per episode: {num_support} ({num_support}-shot)")
     print(f"  Queries per episode: {num_queries}")
     print(f"  Total query samples: {num_episodes * num_queries}")
     print()
@@ -597,6 +611,26 @@ def run_evaluation(model: nn.Module, dataloader: DataLoader, device: torch.devic
                 visibility=visibility_list
             )
             
+            # Compute per-query PCK for visualization ranking
+            per_query_pck = []
+            for idx in range(len(pred_kpts_trimmed)):
+                try:
+                    pck_val = compute_pck_bbox(
+                        pred_kpts_trimmed_pixels[idx],
+                        gt_kpts_trimmed_pixels[idx],
+                        bbox_widths[idx].item(),
+                        bbox_heights[idx].item(),
+                        visibility=visibility_list[idx] if visibility_list else None,
+                        threshold=pck_threshold
+                    )
+                    # compute_pck_bbox returns (pck, correct, total) tuple
+                    if isinstance(pck_val, tuple):
+                        per_query_pck.append(pck_val[0])
+                    else:
+                        per_query_pck.append(float(pck_val))
+                except Exception:
+                    per_query_pck.append(0.0)
+            
             # Store predictions for visualization
             predictions_list.append({
                 'episode_idx': batch_idx,
@@ -613,6 +647,7 @@ def run_evaluation(model: nn.Module, dataloader: DataLoader, device: torch.devic
                 'visibility': visibility_list,
                 'category_ids': batch.get('category_ids', None),
                 'query_metadata': query_metadata,
+                'per_query_pck': per_query_pck,  # Per-query PCK for visualization ranking
             })
     
     # Get final metrics
@@ -659,7 +694,10 @@ def run_evaluation(model: nn.Module, dataloader: DataLoader, device: torch.devic
             print()
     
     # Per-category results
-    if show_per_category and 'per_category' in results and len(results['per_category']) > 0:
+    # Note: PCKEvaluator returns 'pck_per_category' with category_id -> pck (float)
+    pck_per_cat = results.get('pck_per_category', {})
+    
+    if show_per_category and pck_per_cat and len(pck_per_cat) > 0:
         print("=" * 80)
         print("PER-CATEGORY PCK BREAKDOWN")
         print("=" * 80)
@@ -667,48 +705,44 @@ def run_evaluation(model: nn.Module, dataloader: DataLoader, device: torch.devic
         
         # Determine sorting
         if sort_by_pck == 'desc':
-            cat_results = sorted(results['per_category'].items(), 
-                               key=lambda x: x[1]['pck'], reverse=True)
+            cat_results = sorted(pck_per_cat.items(), 
+                               key=lambda x: x[1], reverse=True)
             print(f"Sorted by PCK (best → worst):")
         elif sort_by_pck == 'asc':
-            cat_results = sorted(results['per_category'].items(), 
-                               key=lambda x: x[1]['pck'], reverse=False)
+            cat_results = sorted(pck_per_cat.items(), 
+                               key=lambda x: x[1], reverse=False)
             print(f"Sorted by PCK (worst → best):")
         else:  # 'id'
-            cat_results = sorted(results['per_category'].items(), 
+            cat_results = sorted(pck_per_cat.items(), 
                                key=lambda x: int(x[0]))
             print(f"Sorted by Category ID:")
         print()
         
         # Table header
         if category_names:
-            print(f"  {'ID':<6} {'Category Name':<25} {'PCK':<12} {'Correct/Total':<15}")
-            print(f"  {'-'*6} {'-'*25} {'-'*12} {'-'*15}")
+            print(f"  {'ID':<6} {'Category Name':<30} {'PCK':<12}")
+            print(f"  {'-'*6} {'-'*30} {'-'*12}")
         else:
-            print(f"  {'Category ID':<15} {'PCK':<12} {'Correct/Total':<15}")
-            print(f"  {'-'*15} {'-'*12} {'-'*15}")
+            print(f"  {'Category ID':<15} {'PCK':<12}")
+            print(f"  {'-'*15} {'-'*12}")
         
         # Table rows
-        for cat_id, cat_metrics in cat_results:
-            pck = cat_metrics['pck']
-            correct = cat_metrics['correct']
-            total = cat_metrics['total']
+        for cat_id, pck in cat_results:
             pck_str = f"{pck:.2%}"
-            ratio_str = f"{correct}/{total}"
             
             if category_names:
                 cat_name = category_names.get(int(cat_id), f"cat_{cat_id}")
                 # Truncate long names
-                if len(cat_name) > 24:
-                    cat_name = cat_name[:21] + "..."
-                print(f"  {cat_id:<6} {cat_name:<25} {pck_str:<12} {ratio_str:<15}")
+                if len(cat_name) > 29:
+                    cat_name = cat_name[:26] + "..."
+                print(f"  {cat_id:<6} {cat_name:<30} {pck_str:<12}")
             else:
-                print(f"  {cat_id:<15} {pck_str:<12} {ratio_str:<15}")
+                print(f"  {cat_id:<15} {pck_str:<12}")
         
         print()
         
         # Summary statistics
-        pcks = [m['pck'] for m in results['per_category'].values()]
+        pcks = list(pck_per_cat.values())
         print(f"  Summary:")
         print(f"    Categories evaluated: {len(pcks)}")
         print(f"    Mean PCK: {np.mean(pcks):.2%}")
@@ -984,33 +1018,38 @@ def create_visualization(pred_dict: Dict, output_path: Path,
         label='Predicted'
     )
     
-    # Compute PCK for this sample
+    # Get PCK for this sample (use pre-computed value if available)
     try:
-        # Ensure keypoints are tensors
-        if not isinstance(pred_kpts, torch.Tensor):
-            pred_kpts_tensor = torch.from_numpy(pred_kpts)
+        per_query_pck = pred_dict.get('per_query_pck', None)
+        if per_query_pck is not None and query_idx < len(per_query_pck):
+            # Use pre-computed PCK
+            pck_val = per_query_pck[query_idx]
         else:
-            pred_kpts_tensor = pred_kpts
+            # Compute PCK if not pre-computed
+            if not isinstance(pred_kpts, torch.Tensor):
+                pred_kpts_tensor = torch.from_numpy(pred_kpts)
+            else:
+                pred_kpts_tensor = pred_kpts
+            
+            if not isinstance(gt_kpts, torch.Tensor):
+                gt_kpts_tensor = torch.from_numpy(gt_kpts)
+            else:
+                gt_kpts_tensor = gt_kpts
+            
+            # compute_pck_bbox returns (pck, correct, total) tuple
+            pck_result = compute_pck_bbox(
+                pred_kpts_tensor, gt_kpts_tensor,
+                bbox_w_original, bbox_h_original,
+                threshold=pred_dict.get('pck_threshold', 0.2),
+                visibility_mask=visibility
+            )
+            # Extract PCK value from tuple
+            if isinstance(pck_result, tuple):
+                pck_val = pck_result[0]
+            else:
+                pck_val = float(pck_result)
         
-        if not isinstance(gt_kpts, torch.Tensor):
-            gt_kpts_tensor = torch.from_numpy(gt_kpts)
-        else:
-            gt_kpts_tensor = gt_kpts
-        
-        # ====================================================================
-        # PCK computation uses ORIGINAL bbox dims for threshold calculation
-        # ====================================================================
-        # PCK@bbox threshold = alpha * sqrt(bbox_w² + bbox_h²)
-        # where bbox_w and bbox_h are the ORIGINAL bbox dimensions.
-        # This is correct - keypoints are in [0,1] space, bbox dims scale threshold.
-        # ====================================================================
-        pck = compute_pck_bbox(
-            pred_kpts_tensor, gt_kpts_tensor,
-            bbox_w_original, bbox_h_original,  # Use ORIGINAL dims for PCK threshold
-            threshold=pred_dict.get('pck_threshold', 0.2),
-            visibility_mask=visibility
-        )
-        pck_text = f"PCK@0.2: {pck:.2%}"
+        pck_text = f"PCK@0.2: {pck_val:.2%}"
     except Exception as e:
         pck_text = f"PCK: N/A ({type(e).__name__})"
     
@@ -1137,7 +1176,6 @@ def main():
         args.num_workers,
         num_episodes=args.num_episodes,
         num_queries=args.num_queries_per_episode,
-        num_support=args.num_support_per_episode,
         eval_seed=args.eval_seed,
         full_split=args.full_split
     )
@@ -1168,32 +1206,99 @@ def main():
     print("=" * 80)
     print()
     
-    num_to_visualize = min(args.num_visualizations, len(predictions_list))
-    print(f"Creating {num_to_visualize} visualizations...")
+    # Group predictions by category for organized visualization
+    from collections import defaultdict
+    predictions_by_category = defaultdict(list)
+    
+    for idx, pred_dict in enumerate(predictions_list):
+        pred_dict['pck_threshold'] = args.pck_threshold
+        pred_dict['episode_idx'] = idx
+        
+        # Group by category
+        num_queries = len(pred_dict['pred_keypoints']) if isinstance(pred_dict['pred_keypoints'], list) else pred_dict['pred_keypoints'].shape[0]
+        for query_idx in range(num_queries):
+            if pred_dict['category_ids'] is not None:
+                # Convert tensor element to Python int for proper dict key behavior
+                cat_id_raw = pred_dict['category_ids'][query_idx]
+                cat_id = int(cat_id_raw.item()) if hasattr(cat_id_raw, 'item') else int(cat_id_raw)
+            else:
+                cat_id = 'unknown'
+            predictions_by_category[cat_id].append((pred_dict, query_idx))
+    
+    print(f"Found {len(predictions_by_category)} categories with predictions")
     print()
     
-    for idx in range(num_to_visualize):
-        pred_dict = predictions_list[idx]
+    # Determine how many visualizations per category
+    min_per_cat = args.min_vis_per_category
+    total_vis_count = 0
+    vis_per_cat_count = {}
+    
+    # Sort categories for consistent output
+    sorted_cat_ids = sorted(predictions_by_category.keys(), key=lambda x: int(x) if str(x).isdigit() else 0)
+    
+    for cat_id in sorted_cat_ids:
+        preds = predictions_by_category[cat_id]
         
-        # Store PCK threshold for visualization
-        pred_dict['pck_threshold'] = args.pck_threshold
+        # Sort by PCK if --visualize-top-pck is set (highest PCK first)
+        if args.visualize_top_pck:
+            def get_pck_for_pred(pred_query_tuple):
+                pred_dict, query_idx = pred_query_tuple
+                pck_list = pred_dict.get('per_query_pck', [])
+                if query_idx < len(pck_list):
+                    return pck_list[query_idx]
+                return 0.0
+            preds = sorted(preds, key=get_pck_for_pred, reverse=True)
         
-        # Determine how many queries to save
-        num_queries = len(pred_dict['pred_keypoints']) if isinstance(pred_dict['pred_keypoints'], list) else pred_dict['pred_keypoints'].shape[0]
-        queries_to_save = range(num_queries) if args.save_all_queries else [0]
+        # Get category name for subdirectory
+        try:
+            cat_id_int = int(cat_id)
+            cat_name = category_names.get(cat_id_int, f"category_{cat_id}") if category_names else f"category_{cat_id}"
+        except (ValueError, TypeError):
+            cat_id_int = None
+            cat_name = f"category_{cat_id}"
         
-        for query_idx in queries_to_save:
-            # Get category ID for filename
-            cat_id = pred_dict['category_ids'][query_idx] if pred_dict['category_ids'] is not None else 'unknown'
-            
+        # Clean category name for filesystem (remove special chars)
+        cat_name_clean = "".join(c if c.isalnum() or c in ('_', '-') else '_' for c in cat_name)
+        cat_dir_name = f"{cat_id_int:02d}_{cat_name_clean}" if cat_id_int is not None else cat_name_clean
+        
+        # Create category subdirectory
+        if args.organize_by_category:
+            cat_vis_dir = vis_dir / cat_dir_name
+            cat_vis_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            cat_vis_dir = vis_dir
+        
+        # Determine how many to visualize for this category
+        num_available = len(preds)
+        num_to_vis = min(min_per_cat, num_available)
+        
+        # Apply global limit if set (0 means no global limit)
+        if args.num_visualizations > 0:
+            remaining_global = args.num_visualizations - total_vis_count
+            num_to_vis = min(num_to_vis, remaining_global)
+            if num_to_vis <= 0:
+                break  # Global limit reached
+        
+        cat_vis_count = 0
+        
+        for vis_idx, (pred_dict, query_idx) in enumerate(preds[:num_to_vis]):
             # Get image ID if available
             img_id = 'unknown'
             if pred_dict['query_metadata'] is not None and len(pred_dict['query_metadata']) > query_idx:
                 img_id = pred_dict['query_metadata'][query_idx].get('image_id', 'unknown')
             
+            # Get per-query PCK for filename (if available)
+            pck_str = ""
+            if args.visualize_top_pck:
+                pck_list = pred_dict.get('per_query_pck', [])
+                if query_idx < len(pck_list):
+                    pck_val = pck_list[query_idx]
+                    pck_str = f"_pck{int(pck_val*100):02d}"
+            
             # Create output filename
-            output_filename = f"vis_{idx:04d}_q{query_idx}_cat{cat_id}_img{img_id}.png"
-            output_path = vis_dir / output_filename
+            episode_idx = pred_dict['episode_idx']
+            output_filename = f"vis_{vis_idx:03d}{pck_str}_ep{episode_idx:04d}_img{img_id}.png"
+            output_path = cat_vis_dir / output_filename
             
             # Create visualization
             try:
@@ -1203,13 +1308,19 @@ def main():
                     draw_skeleton=args.draw_skeleton,
                     query_idx=query_idx
                 )
+                cat_vis_count += 1
+                total_vis_count += 1
             except Exception as e:
-                print(f"  ⚠️  Failed to create visualization {idx}: {e}")
+                print(f"  ⚠️  Failed to create visualization for cat {cat_id}: {e}")
                 continue
+        
+        if cat_vis_count > 0:
+            vis_per_cat_count[cat_id] = cat_vis_count
+            print(f"  ✓ {cat_dir_name}: {cat_vis_count} visualizations")
     
     print()
     print(f"✓ Visualizations saved to: {vis_dir}")
-    print(f"  Total: {num_to_visualize} visualization(s)")
+    print(f"  Total: {total_vis_count} visualization(s) across {len(vis_per_cat_count)} categories")
     print()
     
     # Print final summary
@@ -1224,8 +1335,9 @@ def main():
     print()
     
     # Top/bottom performing categories
-    if 'per_category' in metrics and len(metrics['per_category']) > 0:
-        cat_pcks = [(cat_id, cat_metrics['pck']) for cat_id, cat_metrics in metrics['per_category'].items()]
+    pck_per_cat_summary = metrics.get('pck_per_category', {})
+    if pck_per_cat_summary and len(pck_per_cat_summary) > 0:
+        cat_pcks = [(cat_id, pck) for cat_id, pck in pck_per_cat_summary.items()]
         cat_pcks_sorted = sorted(cat_pcks, key=lambda x: x[1], reverse=True)
         
         print("Top 5 performing categories:")
