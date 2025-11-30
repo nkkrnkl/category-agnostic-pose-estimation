@@ -4,7 +4,7 @@ This repository implements **Category-Agnostic Pose Estimation (CAPE)** using a 
 
 ## Table of Contents
 
-- [How to Run](#how-to-run) ⭐ **Start here for execution instructions**
+- [How to Run](#how-to-run) **Start here for execution instructions**
 - [Dependencies](#dependencies)
 - [Code Structure](#code-structure)
 - [Overview](#overview)
@@ -16,7 +16,7 @@ This repository implements **Category-Agnostic Pose Estimation (CAPE)** using a 
 
 ---
 
-## How to Run ⭐
+## How to Run
 
 ### Training
 
