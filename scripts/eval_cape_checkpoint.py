@@ -112,6 +112,8 @@ def get_args_parser():
                        help='Random seed for reproducible evaluation (default: 123)')
     parser.add_argument('--num-queries-per-episode', default=None, type=int,
                        help='Queries per episode (None = use checkpoint default)')
+    parser.add_argument('--num-support-per-episode', default=1, type=int,
+                       help='Number of support images per episode (for 1-shot, 5-shot, etc.)')
     parser.add_argument('--pck-threshold', default=0.2, type=float,
                        help='PCK threshold (fraction of bbox diagonal)')
     
@@ -237,7 +239,7 @@ def load_checkpoint_and_model(checkpoint_path: str, device: torch.device) -> Tup
 
 def build_dataloader(args: argparse.Namespace, split: str, num_workers: int,
                      num_episodes: int = None, num_queries: int = None,
-                     eval_seed: int = 123, full_split: bool = False) -> DataLoader:
+                     num_support: int = None, eval_seed: int = 123, full_split: bool = False) -> DataLoader:
     """
     Build episodic dataloader for evaluation.
     
@@ -265,6 +267,8 @@ def build_dataloader(args: argparse.Namespace, split: str, num_workers: int,
     # Use checkpoint values or override
     if num_queries is None:
         num_queries = getattr(args, 'num_queries_per_episode', 2)
+    if num_support is None:
+        num_support = getattr(args, 'num_support_per_episode', 1)
     
     # Handle full_split mode: evaluate ALL images in the split
     if full_split:
@@ -291,6 +295,7 @@ def build_dataloader(args: argparse.Namespace, split: str, num_workers: int,
         split=split,
         batch_size=1,  # Process one episode at a time for visualization
         num_queries_per_episode=num_queries,
+        num_support_per_episode=num_support,
         episodes_per_epoch=num_episodes,
         num_workers=num_workers,
         seed=eval_seed,  # Deterministic evaluation with configurable seed
@@ -299,6 +304,7 @@ def build_dataloader(args: argparse.Namespace, split: str, num_workers: int,
     
     print(f"✓ Episodic dataloader:")
     print(f"  Episodes per epoch: {num_episodes}")
+    print(f"  Support per episode: {num_support} ({num_support}-shot)")
     print(f"  Queries per episode: {num_queries}")
     print(f"  Total query samples: {num_episodes * num_queries}")
     print()
@@ -1131,6 +1137,7 @@ def main():
         args.num_workers,
         num_episodes=args.num_episodes,
         num_queries=args.num_queries_per_episode,
+        num_support=args.num_support_per_episode,
         eval_seed=args.eval_seed,
         full_split=args.full_split
     )

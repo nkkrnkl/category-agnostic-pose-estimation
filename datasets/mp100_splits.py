@@ -15,8 +15,8 @@ def load_mp100_split(dataset_root, split_id=1):
         dict with train, test, split_id, total_categories
     """
     dataset_root = Path(dataset_root)
-    train_file = dataset_root / f'annotations/mp100_split{split_id}_train.json'
-    test_file = dataset_root / f'annotations/mp100_split{split_id}_test.json'
+    train_file = dataset_root / f'clean_annotations/mp100_split{split_id}_train.json'
+    test_file = dataset_root / f'clean_annotations/mp100_split{split_id}_test.json'
     if not train_file.exists() or not test_file.exists():
         raise FileNotFoundError(
             f"MP-100 split {split_id} not found. "

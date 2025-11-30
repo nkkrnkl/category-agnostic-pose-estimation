@@ -846,9 +846,9 @@ def build_mp100_cape(image_set, args):
     # Paths
     # data folder is in dataset_root/data
     root = Path(args.dataset_root) / "data"
-    # annotations are in dataset_root/annotations
+    # annotations are in dataset_root/clean_annotations (using cleaned annotations)
     # Use resolve() to convert relative paths to absolute first
-    ann_file = Path(args.dataset_root).resolve() / "annotations" / f"mp100_split{split_num}_{image_set}.json"
+    ann_file = Path(args.dataset_root).resolve() / "clean_annotations" / f"mp100_split{split_num}_{image_set}.json"
 
     if not ann_file.exists():
         raise FileNotFoundError(f"Annotation file not found: {ann_file}")
